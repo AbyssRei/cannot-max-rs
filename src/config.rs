@@ -1,4 +1,5 @@
 use crate::core::{CaptureSource, GameMode, Roi};
+use crate::ocr::OcrBackend;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -12,6 +13,9 @@ pub struct AppConfig {
     pub roi: Option<Roi>,
     pub model_path: PathBuf,
     pub resource_root: PathBuf,
+    pub maa_library_path: PathBuf,
+    pub ocr_model_path: PathBuf,
+    pub ocr_backend: OcrBackend,
 }
 
 impl Default for AppConfig {
@@ -28,6 +32,9 @@ impl Default for AppConfig {
                 .join("models")
                 .join("cannot-max-v1.safetensors"),
             resource_root: python_root,
+            maa_library_path: workspace_root.join("maa").join("MaaFramework.dll"),
+            ocr_model_path: workspace_root.join("maa").join("model").join("ocr"),
+            ocr_backend: OcrBackend::Maa,
         }
     }
 }

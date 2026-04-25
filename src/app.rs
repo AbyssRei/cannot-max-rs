@@ -1,6 +1,7 @@
 use crate::capture::{capture_frame, discover_sources};
 use crate::config::AppConfig;
 use crate::core::{AnalysisOutput, CaptureCatalog, GameMode, PredictionResult, SourceChoice};
+use crate::ocr::{OcrBackend, library_hint, ocr_hint};
 use crate::prediction::{CandlePredictor, Predictor};
 use crate::recognition::{analyze_frame, default_battle_roi};
 use crate::resources::ResourceStore;
@@ -25,6 +26,9 @@ pub enum Message {
     AnalysisFinished(Result<AnalysisOutput, String>),
     ResourceRootChanged(String),
     ModelPathChanged(String),
+    MaaLibraryPathChanged(String),
+    OcrModelPathChanged(String),
+    OcrBackendSelected(OcrBackend),
     RoiXChanged(String),
     RoiYChanged(String),
     RoiWidthChanged(String),
@@ -48,6 +52,8 @@ pub struct CannotMaxApp {
     roi_height: String,
     resource_root_text: String,
     model_path_text: String,
+    maa_library_path_text: String,
+    ocr_model_path_text: String,
     busy: bool,
 }
 
@@ -55,14 +61,13 @@ impl CannotMaxApp {
     fn new() -> Self {
         let config = AppConfig::load();
         let default_roi = config.roi.unwrap_or_default();
-        let resources_summary = match ResourceStore::load(&config) {
-            Ok(store) => store.summary(),
-            Err(error) => format!("资源尚未就绪: {error}"),
-        };
+        let resources_summary = summarize_runtime(&config);
 
         Self {
             resource_root_text: config.resource_root.display().to_string(),
             model_path_text: config.model_path.display().to_string(),
+            maa_library_path_text: config.maa_library_path.display().to_string(),
+            ocr_model_path_text: config.ocr_model_path.display().to_string(),
             roi_x: default_roi.x.to_string(),
             roi_y: default_roi.y.to_string(),
             roi_width: default_roi.width.to_string(),
@@ -95,6 +100,8 @@ impl CannotMaxApp {
     fn save_config(&mut self) {
         self.config.resource_root = self.resource_root_text.clone().into();
         self.config.model_path = self.model_path_text.clone().into();
+        self.config.maa_library_path = self.maa_library_path_text.clone().into();
+        self.config.ocr_model_path = self.ocr_model_path_text.clone().into();
         self.config.roi = self.current_roi().filter(|roi| !roi.is_empty());
         self.status = match self.config.save() {
             Ok(()) => "配置已保存".to_string(),
@@ -112,6 +119,19 @@ fn boot() -> (CannotMaxApp, Task<Message>) {
 
 fn app_theme(_: &CannotMaxApp) -> Theme {
     Theme::TokyoNight
+}
+
+fn summarize_runtime(config: &AppConfig) -> String {
+    let resource_summary = match ResourceStore::load(config) {
+        Ok(store) => store.summary(),
+        Err(error) => format!("资源尚未就绪: {error}"),
+    };
+
+    format!(
+        "{resource_summary}\n{}\n{}",
+        library_hint(config),
+        ocr_hint(config)
+    )
 }
 
 pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
@@ -158,6 +178,8 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             app.status = "正在截屏、识别并预测…".to_string();
             app.config.resource_root = app.resource_root_text.clone().into();
             app.config.model_path = app.model_path_text.clone().into();
+            app.config.maa_library_path = app.maa_library_path_text.clone().into();
+            app.config.ocr_model_path = app.ocr_model_path_text.clone().into();
             app.config.roi = app.current_roi().filter(|roi| !roi.is_empty());
             let _ = app.config.save();
 
@@ -167,7 +189,8 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 async move {
                     let resources = ResourceStore::load(&config)?;
                     let frame = capture_frame(&source.source, &config, &catalog)?;
-                    let snapshot = analyze_frame(&source.source, &frame, config.roi, &resources);
+                    let snapshot =
+                        analyze_frame(&source.source, &frame, config.roi, &resources, &config);
                     let predictor = CandlePredictor::new(config.model_path.clone());
                     let prediction = predictor.predict(&snapshot)?;
 
@@ -232,6 +255,20 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             app.model_path_text = value;
             Task::none()
         }
+        Message::MaaLibraryPathChanged(value) => {
+            app.maa_library_path_text = value;
+            Task::none()
+        }
+        Message::OcrModelPathChanged(value) => {
+            app.ocr_model_path_text = value;
+            Task::none()
+        }
+        Message::OcrBackendSelected(value) => {
+            app.config.ocr_backend = value;
+            let _ = app.config.save();
+            app.resources_summary = summarize_runtime(&app.config);
+            Task::none()
+        }
         Message::RoiXChanged(value) => {
             app.roi_x = value;
             Task::none()
@@ -255,10 +292,7 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
         }
         Message::SaveConfig => {
             app.save_config();
-            app.resources_summary = match ResourceStore::load(&app.config) {
-                Ok(store) => store.summary(),
-                Err(error) => format!("资源尚未就绪: {error}"),
-            };
+            app.resources_summary = summarize_runtime(&app.config);
             Task::none()
         }
     }
@@ -306,6 +340,15 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
         text("路径与资源").size(20),
         text_input("资源根目录", &app.resource_root_text).on_input(Message::ResourceRootChanged),
         text_input("模型路径", &app.model_path_text).on_input(Message::ModelPathChanged),
+        text_input("MAA 动态库路径", &app.maa_library_path_text)
+            .on_input(Message::MaaLibraryPathChanged),
+        text_input("OCR 模型目录", &app.ocr_model_path_text).on_input(Message::OcrModelPathChanged),
+        pick_list(
+            vec![OcrBackend::Maa, OcrBackend::PaddleOcrVl],
+            Some(app.config.ocr_backend),
+            Message::OcrBackendSelected
+        )
+        .placeholder("选择 OCR 后端"),
         text(&app.resources_summary).size(14),
     ]
     .spacing(8);

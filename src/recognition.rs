@@ -1,4 +1,6 @@
+use crate::config::AppConfig;
 use crate::core::{BattleSnapshot, CaptureSource, CapturedFrame, RecognizedUnit, Roi, Side};
+use crate::ocr::recognize_count;
 use crate::resources::ResourceStore;
 use image::imageops::FilterType;
 use image::{GrayImage, RgbaImage};
@@ -17,6 +19,7 @@ pub fn analyze_frame(
     frame: &CapturedFrame,
     roi: Option<Roi>,
     resources: &ResourceStore,
+    config: &AppConfig,
 ) -> BattleSnapshot {
     let width = frame.image.width();
     let height = frame.image.height();
@@ -28,7 +31,7 @@ pub fn analyze_frame(
     let region = crop_rgba(&frame.image, effective_roi);
     let gray = image::DynamicImage::ImageRgba8(region.clone()).to_luma8();
     let resized = image::imageops::resize(&gray, 969, 119, FilterType::Triangle);
-    let units = recognize_units(&resized, resources);
+    let units = recognize_units(&resized, resources, config);
 
     BattleSnapshot {
         source: source.clone(),
@@ -39,7 +42,11 @@ pub fn analyze_frame(
     }
 }
 
-fn recognize_units(frame: &GrayImage, resources: &ResourceStore) -> Vec<RecognizedUnit> {
+fn recognize_units(
+    frame: &GrayImage,
+    resources: &ResourceStore,
+    config: &AppConfig,
+) -> Vec<RecognizedUnit> {
     let mut units = Vec::new();
 
     for (index, region) in UNIT_REGIONS.iter().enumerate() {
@@ -59,11 +66,24 @@ fn recognize_units(frame: &GrayImage, resources: &ResourceStore) -> Vec<Recogniz
             continue;
         }
 
+        let count_image = crop_count_region(&slot);
+        let count = recognize_count(&count_image, config)
+            .ok()
+            .flatten()
+            .and_then(|value| {
+                if value.confidence >= 0.20 {
+                    value.text.parse::<u32>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| estimate_count(&slot));
+
         units.push(RecognizedUnit {
             side: if index < 3 { Side::Left } else { Side::Right },
             slot: index,
             unit_id,
-            count: estimate_count(&slot),
+            count,
             confidence,
         });
     }
@@ -100,6 +120,14 @@ fn compare(left: &GrayImage, right: &GrayImage) -> f32 {
     }
 
     (1.0 - (total / pixels as f32)).clamp(0.0, 1.0)
+}
+
+fn crop_count_region(slot: &GrayImage) -> GrayImage {
+    let x = ((slot.width() as f32) * 0.46) as u32;
+    let y = ((slot.height() as f32) * 0.56) as u32;
+    let width = slot.width().saturating_sub(x).max(1);
+    let height = slot.height().saturating_sub(y).max(1);
+    image::imageops::crop_imm(slot, x, y, width, height).to_image()
 }
 
 fn estimate_count(slot: &GrayImage) -> u32 {
