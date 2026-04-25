@@ -1,4 +1,5 @@
 pub mod app;
+pub mod automation;
 pub mod capture;
 pub mod config;
 pub mod core;

@@ -1,3 +1,4 @@
+use crate::automation::{AutomationAction, execute_action};
 use crate::capture::discover_sources;
 use crate::config::AppConfig;
 use crate::core::{AnalysisOutput, CaptureCatalog, GameMode, PredictionResult, SourceChoice};
@@ -37,6 +38,13 @@ pub enum Message {
     RoiWidthChanged(String),
     RoiHeightChanged(String),
     ModeChanged(GameMode),
+    ActionXChanged(String),
+    ActionYChanged(String),
+    ActionTextChanged(String),
+    SendClick,
+    SendInputText,
+    SendInactive,
+    AutomationFinished(Result<String, String>),
     SaveConfig,
 }
 
@@ -59,6 +67,9 @@ pub struct CannotMaxApp {
     ocr_model_path_text: String,
     deepseek_cli_path_text: String,
     deepseek_device_text: String,
+    action_x_text: String,
+    action_y_text: String,
+    action_text: String,
     busy: bool,
 }
 
@@ -75,6 +86,9 @@ impl CannotMaxApp {
             ocr_model_path_text: config.ocr_model_path.display().to_string(),
             deepseek_cli_path_text: config.deepseek_cli_path.display().to_string(),
             deepseek_device_text: config.deepseek_device.clone(),
+            action_x_text: "960".to_string(),
+            action_y_text: "540".to_string(),
+            action_text: String::new(),
             roi_x: default_roi.x.to_string(),
             roi_y: default_roi.y.to_string(),
             roi_width: default_roi.width.to_string(),
@@ -201,10 +215,110 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             let catalog = app.catalog.clone();
             Task::perform(
                 async move {
-                    AnalysisPipeline::new(config.model_path.clone()).run(&source.source, &catalog, &config)
+                    AnalysisPipeline::new(config.model_path.clone())
+                        .run(&source.source, &catalog, &config)
                 },
                 Message::AnalysisFinished,
             )
+        }
+        Message::ActionXChanged(value) => {
+            app.action_x_text = value;
+            Task::none()
+        }
+        Message::ActionYChanged(value) => {
+            app.action_y_text = value;
+            Task::none()
+        }
+        Message::ActionTextChanged(value) => {
+            app.action_text = value;
+            Task::none()
+        }
+        Message::SendClick => {
+            let Some(source) = app.selected_source.clone() else {
+                app.status = "请先选择一个输入源".to_string();
+                return Task::none();
+            };
+
+            let Ok(x) = app.action_x_text.trim().parse::<i32>() else {
+                app.status = "点击坐标 x 无效，请输入整数".to_string();
+                return Task::none();
+            };
+            let Ok(y) = app.action_y_text.trim().parse::<i32>() else {
+                app.status = "点击坐标 y 无效，请输入整数".to_string();
+                return Task::none();
+            };
+
+            app.busy = true;
+            app.status = "正在发送自动点击…".to_string();
+            let config = app.config.clone();
+            let catalog = app.catalog.clone();
+
+            Task::perform(
+                async move {
+                    execute_action(
+                        &source.source,
+                        &catalog,
+                        &config,
+                        AutomationAction::Click { x, y },
+                    )
+                },
+                Message::AutomationFinished,
+            )
+        }
+        Message::SendInputText => {
+            let Some(source) = app.selected_source.clone() else {
+                app.status = "请先选择一个输入源".to_string();
+                return Task::none();
+            };
+
+            if app.action_text.trim().is_empty() {
+                app.status = "请输入要发送的文本".to_string();
+                return Task::none();
+            }
+
+            app.busy = true;
+            app.status = "正在发送文本输入…".to_string();
+            let config = app.config.clone();
+            let catalog = app.catalog.clone();
+            let text = app.action_text.clone();
+
+            Task::perform(
+                async move {
+                    execute_action(
+                        &source.source,
+                        &catalog,
+                        &config,
+                        AutomationAction::InputText { text },
+                    )
+                },
+                Message::AutomationFinished,
+            )
+        }
+        Message::SendInactive => {
+            let Some(source) = app.selected_source.clone() else {
+                app.status = "请先选择一个输入源".to_string();
+                return Task::none();
+            };
+
+            app.busy = true;
+            app.status = "正在发送 inactive 请求…".to_string();
+            let config = app.config.clone();
+            let catalog = app.catalog.clone();
+
+            Task::perform(
+                async move {
+                    execute_action(&source.source, &catalog, &config, AutomationAction::Inactive)
+                },
+                Message::AutomationFinished,
+            )
+        }
+        Message::AutomationFinished(result) => {
+            app.busy = false;
+            app.status = match result {
+                Ok(message) => message,
+                Err(error) => format!("自动化执行失败: {error}"),
+            };
+            Task::none()
         }
         Message::AnalysisFinished(result) => {
             app.busy = false;
@@ -360,6 +474,34 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
     ]
     .spacing(12);
 
+    let automation_panel = column![
+        text("自动化操作（MAA）").size(20),
+        row![
+            text_input("x", &app.action_x_text)
+                .on_input(Message::ActionXChanged)
+                .width(Length::FillPortion(1)),
+            text_input("y", &app.action_y_text)
+                .on_input(Message::ActionYChanged)
+                .width(Length::FillPortion(1)),
+            button("发送点击")
+                .on_press_maybe((!app.busy).then_some(Message::SendClick)),
+        ]
+        .spacing(8),
+        row![
+            text_input("输入文本", &app.action_text)
+                .on_input(Message::ActionTextChanged)
+                .width(Length::FillPortion(3)),
+            button("发送文本")
+                .on_press_maybe((!app.busy).then_some(Message::SendInputText)),
+            button("恢复窗口/输入")
+                .on_press_maybe((!app.busy).then_some(Message::SendInactive)),
+        ]
+        .spacing(8),
+        text("提示：仅 ADB/窗口源支持自动化；显示器源会返回失败。MAA 路径需配置正确。")
+            .size(13),
+    ]
+    .spacing(8);
+
     let path_panel = column![
         text("路径与资源").size(20),
         text_input("资源根目录", &app.resource_root_text).on_input(Message::ResourceRootChanged),
@@ -459,7 +601,8 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
             header,
             controls,
             row![
-                container(column![path_panel, roi_panel].spacing(16)).width(Length::FillPortion(1)),
+                container(column![path_panel, roi_panel, automation_panel].spacing(16))
+                    .width(Length::FillPortion(1)),
                 container(column![preview_panel, result_panel].spacing(16))
                     .width(Length::FillPortion(2)),
             ]
