@@ -299,8 +299,13 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             let catalog = app.catalog.clone();
             Task::perform(
                 async move {
-                    AnalysisPipeline::new(config.model_path.clone())
-                        .run(&source.source, &catalog, &config)
+                    let history_csv = config.resource_root.join("arknights.csv");
+                    let pipeline = if history_csv.exists() {
+                        AnalysisPipeline::with_history(config.model_path.clone(), history_csv)
+                    } else {
+                        AnalysisPipeline::new(config.model_path.clone())
+                    };
+                    pipeline.run(&source.source, &catalog, &config)
                 },
                 Message::AnalysisFinished,
             )
@@ -445,17 +450,9 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                     };
                     app.prediction = Some(output.prediction.clone());
                     
-                    // 检查特殊怪物
-                    let handler = crate::special_monster::SpecialMonsterHandler::new();
-                    let left_ids: Vec<String> = output.snapshot.units.iter()
-                        .filter(|u| u.side == crate::core::Side::Left)
-                        .map(|u| u.unit_id.clone())
-                        .collect();
-                    let right_ids: Vec<String> = output.snapshot.units.iter()
-                        .filter(|u| u.side == crate::core::Side::Right)
-                        .map(|u| u.unit_id.clone())
-                        .collect();
-                    app.special_messages = handler.check_special_monsters(&left_ids, &right_ids, &output.prediction.winner);
+                    // 使用 pipeline 返回的特殊怪物和历史匹配结果
+                    app.special_messages = output.special_messages;
+                    app.history_results = output.history_results;
                     
                     app.status = format!(
                         "{} | ROI {:?}",

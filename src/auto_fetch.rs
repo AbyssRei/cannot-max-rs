@@ -127,13 +127,32 @@ fn auto_fetch_loop(
 
         // 状态判断：根据识别结果推断当前状态
         if !snapshot.units.is_empty() {
-            current_state = GameState::PreBattle;
+            // 有单位识别结果 → 战前界面
+            match current_state {
+                GameState::InBattle | GameState::Settlement => {
+                    // 战斗中/结算后重新出现单位 → 新一轮战前
+                    current_state = GameState::PreBattle;
+                }
+                _ => {
+                    current_state = GameState::PreBattle;
+                }
+            }
         } else {
-            // 无单位识别结果，可能是其他状态
-            // 简化处理：保持当前状态或设为 Unknown
-            if current_state == GameState::PreBattle {
-                // 从战前状态进入战斗中
-                current_state = GameState::InBattle;
+            // 无单位识别结果，根据当前状态推断
+            match current_state {
+                GameState::PreBattle => {
+                    // 从战前进入战斗中（单位消失=战斗开始）
+                    current_state = GameState::InBattle;
+                }
+                GameState::InBattle => {
+                    // 战斗中单位持续为空，检查是否进入结算
+                    // 使用饱和度分析判断胜负
+                    if let Some(_result) = calculate_battle_result(&frame) {
+                        current_state = GameState::Settlement;
+                    }
+                    // 否则保持 InBattle
+                }
+                _ => {}
             }
         }
 
@@ -222,7 +241,6 @@ fn click_relative(
 }
 
 /// Determine battle result from screenshot saturation analysis
-#[allow(dead_code)]
 fn calculate_battle_result(frame: &CapturedFrame) -> Option<Side> {
     let img = &frame.image;
     let width = img.width() as usize;
@@ -250,7 +268,6 @@ fn calculate_battle_result(frame: &CapturedFrame) -> Option<Side> {
     }
 }
 
-#[allow(dead_code)]
 fn get_saturation(pixel: image::Rgba<u8>) -> f32 {
     let r = pixel[0] as f32 / 255.0;
     let g = pixel[1] as f32 / 255.0;

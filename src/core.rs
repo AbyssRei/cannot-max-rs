@@ -237,6 +237,8 @@ pub struct AnalysisOutput {
     pub frame: CapturedFrame,
     pub snapshot: BattleSnapshot,
     pub prediction: PredictionResult,
+    pub special_messages: String,
+    pub history_results: Vec<String>,
 }
 
 // ── 训练相关类型 ──

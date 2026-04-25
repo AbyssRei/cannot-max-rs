@@ -1,8 +1,8 @@
 use ndarray::{Array1, Array2, Axis};
 use std::path::Path;
 
-const MONSTER_COUNT: usize = 61;
-const FIELD_FEATURE_COUNT: usize = 12;
+const MONSTER_COUNT: usize = 60;
+const FIELD_FEATURE_COUNT: usize = 0;
 
 pub struct HistoryMatch {
     past_left: Array2<f32>,
