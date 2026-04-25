@@ -5,17 +5,19 @@ use maa_framework::resource::Resource;
 use maa_framework::tasker::Tasker;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum OcrBackend {
     #[default]
     Maa,
@@ -32,7 +34,7 @@ impl fmt::Display for OcrBackend {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum DeepseekCliModel {
     DeepseekOcr,
     #[default]
@@ -67,15 +69,61 @@ pub struct OcrValue {
     pub text: String,
     pub confidence: f32,
     pub backend: OcrBackend,
+    pub source_label: String,
+    pub cached: bool,
 }
 
 static MAA_LOAD_RESULT: OnceLock<Result<Option<PathBuf>, String>> = OnceLock::new();
+static OCR_CACHE: OnceLock<Mutex<HashMap<OcrCacheKey, Option<OcrValue>>>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct OcrCacheKey {
+    backend: OcrBackend,
+    model: Option<DeepseekCliModel>,
+    image_hash: u64,
+}
 
 pub fn recognize_count(image: &GrayImage, config: &AppConfig) -> Result<Option<OcrValue>, String> {
-    match config.ocr_backend {
+    let key = OcrCacheKey {
+        backend: config.ocr_backend,
+        model: (config.ocr_backend == OcrBackend::DeepseekCli).then_some(config.deepseek_model),
+        image_hash: hash_image(image),
+    };
+
+    if let Some(cached) = load_cached_ocr_value(key)? {
+        return Ok(Some(cached));
+    }
+
+    let value = match config.ocr_backend {
         OcrBackend::Maa => recognize_with_maa(image, config),
         OcrBackend::DeepseekCli => recognize_with_deepseek_cli(image, config),
+    }?;
+
+    store_cached_ocr_value(key, value.clone())?;
+    Ok(value)
+}
+
+fn load_cached_ocr_value(key: OcrCacheKey) -> Result<Option<OcrValue>, String> {
+    let cache = OCR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cache
+        .lock()
+        .map_err(|_| "OCR cache lock poisoned".to_string())?;
+    Ok(guard.get(&key).cloned().flatten().map(|mut value| {
+        value.cached = true;
+        value
+    }))
+}
+
+fn store_cached_ocr_value(key: OcrCacheKey, value: Option<OcrValue>) -> Result<(), String> {
+    let cache = OCR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .map_err(|_| "OCR cache lock poisoned".to_string())?;
+    guard.insert(key, value);
+    if guard.len() > 256 {
+        guard.clear();
     }
+    Ok(())
 }
 
 pub fn prepare_maa_runtime(config: &AppConfig) -> Result<Option<PathBuf>, String> {
@@ -202,6 +250,8 @@ fn parse_maa_ocr_detail(detail: serde_json::Value) -> Result<Option<OcrValue>, S
                 text: digits,
                 confidence,
                 backend: OcrBackend::Maa,
+                source_label: "MAA OCR".to_string(),
+                cached: false,
             }));
         }
     }
@@ -273,6 +323,8 @@ fn recognize_with_deepseek_cli(
         text: digits,
         confidence: 0.85,
         backend: OcrBackend::DeepseekCli,
+        source_label: format!("deepseek-ocr.rs/{}", config.deepseek_model),
+        cached: false,
     }))
 }
 
@@ -406,4 +458,12 @@ fn exit_code_hint(status: ExitStatus) -> String {
         .code()
         .map(|code| code.to_string())
         .unwrap_or_else(|| "terminated by signal".to_string())
+}
+
+fn hash_image(image: &GrayImage) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    image.width().hash(&mut hasher);
+    image.height().hash(&mut hasher);
+    image.as_raw().hash(&mut hasher);
+    hasher.finish()
 }

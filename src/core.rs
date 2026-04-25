@@ -88,6 +88,8 @@ pub struct RecognizedUnit {
     pub unit_id: String,
     pub count: u32,
     pub confidence: f32,
+    pub count_source: String,
+    pub count_cached: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

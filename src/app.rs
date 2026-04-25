@@ -235,8 +235,14 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                             .iter()
                             .map(|unit| {
                                 format!(
-                                    "{} 槽位{} | ID {} | 数量 {} | 置信度 {:.2}",
-                                    unit.side, unit.slot, unit.unit_id, unit.count, unit.confidence
+                                    "{} 槽位{} | ID {} | 数量 {} | 置信度 {:.2} | 数量来源 {}{}",
+                                    unit.side,
+                                    unit.slot,
+                                    unit.unit_id,
+                                    unit.count,
+                                    unit.confidence,
+                                    unit.count_source,
+                                    if unit.count_cached { " | 缓存" } else { "" }
                                 )
                             })
                             .collect()

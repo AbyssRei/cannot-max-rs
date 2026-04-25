@@ -67,17 +67,19 @@ fn recognize_units(
         }
 
         let count_image = crop_count_region(&slot);
-        let count = recognize_count(&count_image, config)
+        let ocr_value = recognize_count(&count_image, config)
             .ok()
             .flatten()
+            .filter(|value| value.confidence >= 0.20)
             .and_then(|value| {
-                if value.confidence >= 0.20 {
-                    value.text.parse::<u32>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| estimate_count(&slot));
+                value
+                    .text
+                    .parse::<u32>()
+                    .ok()
+                    .map(|count| (count, value.source_label, value.cached))
+            });
+        let (count, count_source, count_cached) =
+            ocr_value.unwrap_or_else(|| (estimate_count(&slot), "基线估算".to_string(), false));
 
         units.push(RecognizedUnit {
             side: if index < 3 { Side::Left } else { Side::Right },
@@ -85,6 +87,8 @@ fn recognize_units(
             unit_id,
             count,
             confidence,
+            count_source,
+            count_cached,
         });
     }
 
