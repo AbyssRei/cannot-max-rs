@@ -1,6 +1,7 @@
 use crate::config::AppConfig;
 use crate::core::{
-    AdbDeviceInfo, CaptureCatalog, CaptureSource, CapturedFrame, DesktopWindowInfo, MonitorInfo,
+    AdbDeviceInfo, CaptureCatalog, CaptureSource, CapturedFrame, DesktopWindowInfo, GameMode,
+    MonitorInfo,
 };
 use image::{ImageBuffer, Rgba, RgbaImage};
 use maa_framework::buffer::MaaImageBuffer;
@@ -12,7 +13,7 @@ use window_enumerator::WindowEnumerator;
 use windows_capture::dxgi_duplication_api::DxgiDuplicationApi;
 use windows_capture::monitor::Monitor;
 
-pub fn discover_sources() -> CaptureCatalog {
+pub fn discover_sources(game_mode: GameMode) -> CaptureCatalog {
     let adb_devices = Toolkit::find_adb_devices()
         .unwrap_or_default()
         .into_iter()
@@ -23,7 +24,7 @@ pub fn discover_sources() -> CaptureCatalog {
         })
         .collect();
 
-    let windows = discover_windows();
+    let windows = discover_windows(game_mode);
     let monitors = discover_monitors();
 
     CaptureCatalog {
@@ -45,13 +46,13 @@ pub fn capture_frame(
     }
 }
 
-fn discover_windows() -> Vec<DesktopWindowInfo> {
+fn discover_windows(game_mode: GameMode) -> Vec<DesktopWindowInfo> {
     let mut enumerator = WindowEnumerator::new();
     if enumerator.enumerate_all_windows().is_err() {
         return Vec::new();
     }
 
-    enumerator
+    let mut windows: Vec<_> = enumerator
         .get_windows()
         .iter()
         .filter(|window| !window.title.trim().is_empty())
@@ -61,7 +62,36 @@ fn discover_windows() -> Vec<DesktopWindowInfo> {
             class_name: window.class_name.clone(),
             process_name: window.process_name.clone(),
         })
-        .collect()
+        .collect();
+
+    windows.sort_by_key(|window| window_priority(window, game_mode));
+    windows
+}
+
+fn window_priority(window: &DesktopWindowInfo, game_mode: GameMode) -> (u8, String) {
+    let title = window.title.to_lowercase();
+    let process_name = window.process_name.to_lowercase();
+    let class_name = window.class_name.to_lowercase();
+    let combined = format!("{title} {process_name} {class_name}");
+    let is_game_window = combined.contains("arknights")
+        || combined.contains("明日方舟")
+        || combined.contains("hypergryph")
+        || combined.contains("prts");
+    let is_emulator_window = combined.contains("emu")
+        || combined.contains("bluestacks")
+        || combined.contains("mumu")
+        || combined.contains("leidian")
+        || combined.contains("nox");
+
+    let group = match game_mode {
+        GameMode::Pc if is_game_window => 0,
+        GameMode::Emulator if is_emulator_window => 0,
+        GameMode::Pc if is_emulator_window => 2,
+        GameMode::Emulator if is_game_window => 2,
+        _ => 1,
+    };
+
+    (group, window.title.to_lowercase())
 }
 
 fn discover_monitors() -> Vec<MonitorInfo> {

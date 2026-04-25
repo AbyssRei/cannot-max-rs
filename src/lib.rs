@@ -6,3 +6,4 @@ pub mod ocr;
 pub mod prediction;
 pub mod recognition;
 pub mod resources;
+pub mod pipeline;

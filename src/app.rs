@@ -1,9 +1,9 @@
-use crate::capture::{capture_frame, discover_sources};
+use crate::capture::discover_sources;
 use crate::config::AppConfig;
 use crate::core::{AnalysisOutput, CaptureCatalog, GameMode, PredictionResult, SourceChoice};
 use crate::ocr::{DeepseekCliModel, OcrBackend, library_hint, ocr_hint};
-use crate::prediction::{CandlePredictor, Predictor};
-use crate::recognition::{analyze_frame, default_battle_roi};
+use crate::pipeline::AnalysisPipeline;
+use crate::recognition::default_battle_roi;
 use crate::resources::ResourceStore;
 use iced::widget::{
     button, column, container, image, pick_list, row, scrollable, text, text_input,
@@ -120,9 +120,11 @@ impl CannotMaxApp {
 }
 
 fn boot() -> (CannotMaxApp, Task<Message>) {
+    let app = CannotMaxApp::new();
+    let mode = app.config.game_mode;
     (
-        CannotMaxApp::new(),
-        Task::perform(async { discover_sources() }, Message::SourcesLoaded),
+        app,
+        Task::perform(async move { discover_sources(mode) }, Message::SourcesLoaded),
     )
 }
 
@@ -147,7 +149,7 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
     match message {
         Message::SourcesLoaded(catalog) => {
             app.catalog = catalog;
-            let choices = app.catalog.source_choices();
+            let choices = app.catalog.source_choices(app.config.game_mode);
             app.selected_source = app
                 .config
                 .last_capture_source
@@ -169,7 +171,8 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
         }
         Message::RefreshSources => {
             app.status = "正在刷新输入源…".to_string();
-            Task::perform(async { discover_sources() }, Message::SourcesLoaded)
+            let mode = app.config.game_mode;
+            Task::perform(async move { discover_sources(mode) }, Message::SourcesLoaded)
         }
         Message::SourceSelected(choice) => {
             app.config.last_capture_source = Some(choice.source.clone());
@@ -198,18 +201,7 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             let catalog = app.catalog.clone();
             Task::perform(
                 async move {
-                    let resources = ResourceStore::load(&config)?;
-                    let frame = capture_frame(&source.source, &config, &catalog)?;
-                    let snapshot =
-                        analyze_frame(&source.source, &frame, config.roi, &resources, &config);
-                    let predictor = CandlePredictor::new(config.model_path.clone());
-                    let prediction = predictor.predict(&snapshot)?;
-
-                    Ok(AnalysisOutput {
-                        frame,
-                        snapshot,
-                        prediction,
-                    })
+                    AnalysisPipeline::new(config.model_path.clone()).run(&source.source, &catalog, &config)
                 },
                 Message::AnalysisFinished,
             )
@@ -319,7 +311,8 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
         Message::ModeChanged(mode) => {
             app.config.game_mode = mode;
             let _ = app.config.save();
-            Task::none()
+            app.status = format!("当前模式已切换为 {mode}，正在刷新输入源…");
+            Task::perform(async move { discover_sources(mode) }, Message::SourcesLoaded)
         }
         Message::SaveConfig => {
             app.save_config();
@@ -330,7 +323,7 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
 }
 
 pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
-    let source_choices = app.catalog.source_choices();
+    let source_choices = app.catalog.source_choices(app.config.game_mode);
 
     let header = column![
         text("cannot-max-rs").size(32),

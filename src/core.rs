@@ -182,7 +182,7 @@ pub struct AnalysisOutput {
 }
 
 impl CaptureCatalog {
-    pub fn source_choices(&self) -> Vec<SourceChoice> {
+    pub fn source_choices(&self, game_mode: GameMode) -> Vec<SourceChoice> {
         let mut sources = Vec::new();
 
         for adb in &self.adb_devices {
@@ -209,7 +209,12 @@ impl CaptureCatalog {
             });
         }
 
+        sources.sort_by_key(|choice| choice.priority(game_mode));
         sources
+    }
+
+    pub fn preferred_source(&self, game_mode: GameMode) -> Option<SourceChoice> {
+        self.source_choices(game_mode).into_iter().next()
     }
 
     pub fn find_adb(&self, address: &str) -> Option<&AdbDeviceInfo> {
@@ -223,9 +228,24 @@ impl CaptureCatalog {
     }
 }
 
+impl SourceChoice {
+    fn priority(&self, game_mode: GameMode) -> (u8, String) {
+        let source_rank = match (&self.source, game_mode) {
+            (CaptureSource::DesktopWindow(_), GameMode::Pc) => 0,
+            (CaptureSource::Monitor(_), GameMode::Pc) => 1,
+            (CaptureSource::Adb(_), GameMode::Emulator) => 0,
+            (CaptureSource::DesktopWindow(_), GameMode::Emulator) => 1,
+            (CaptureSource::Monitor(_), GameMode::Emulator) => 2,
+            (CaptureSource::Adb(_), GameMode::Pc) => 2,
+        };
+
+        (source_rank, self.label.to_lowercase())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Roi;
+    use super::{AdbDeviceInfo, CaptureCatalog, CaptureSource, DesktopWindowInfo, GameMode, MonitorInfo, Roi};
 
     #[test]
     fn clamp_roi_to_bounds() {
@@ -241,5 +261,53 @@ mod tests {
         assert_eq!(clamped.x, 110);
         assert_eq!(clamped.width, 18);
         assert_eq!(clamped.height, 34);
+    }
+
+    #[test]
+    fn pc_mode_prefers_windows() {
+        let catalog = CaptureCatalog {
+            adb_devices: vec![],
+            windows: vec![DesktopWindowInfo {
+                hwnd: 42,
+                title: "Arknights".to_string(),
+                class_name: "UnityWndClass".to_string(),
+                process_name: "Arknights.exe".to_string(),
+            }],
+            monitors: vec![MonitorInfo {
+                index: 1,
+                name: "Display 1".to_string(),
+                width: 1920,
+                height: 1080,
+            }],
+        };
+
+        let first = catalog.preferred_source(GameMode::Pc).unwrap();
+        assert!(matches!(first.source, CaptureSource::DesktopWindow(42)));
+    }
+
+    #[test]
+    fn emulator_mode_prefers_adb() {
+        let catalog = CaptureCatalog {
+            adb_devices: vec![AdbDeviceInfo {
+                name: "emu".to_string(),
+                adb_path: std::path::PathBuf::from("adb.exe"),
+                address: "127.0.0.1:5555".to_string(),
+            }],
+            windows: vec![DesktopWindowInfo {
+                hwnd: 42,
+                title: "Arknights".to_string(),
+                class_name: "UnityWndClass".to_string(),
+                process_name: "Arknights.exe".to_string(),
+            }],
+            monitors: vec![MonitorInfo {
+                index: 1,
+                name: "Display 1".to_string(),
+                width: 1920,
+                height: 1080,
+            }],
+        };
+
+        let first = catalog.preferred_source(GameMode::Emulator).unwrap();
+        assert!(matches!(first.source, CaptureSource::Adb(_)));
     }
 }
