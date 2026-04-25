@@ -1,7 +1,7 @@
 use crate::capture::{capture_frame, discover_sources};
 use crate::config::AppConfig;
 use crate::core::{AnalysisOutput, CaptureCatalog, GameMode, PredictionResult, SourceChoice};
-use crate::ocr::{OcrBackend, library_hint, ocr_hint};
+use crate::ocr::{DeepseekCliModel, OcrBackend, library_hint, ocr_hint};
 use crate::prediction::{CandlePredictor, Predictor};
 use crate::recognition::{analyze_frame, default_battle_roi};
 use crate::resources::ResourceStore;
@@ -29,6 +29,9 @@ pub enum Message {
     MaaLibraryPathChanged(String),
     OcrModelPathChanged(String),
     OcrBackendSelected(OcrBackend),
+    DeepseekCliPathChanged(String),
+    DeepseekModelSelected(DeepseekCliModel),
+    DeepseekDeviceChanged(String),
     RoiXChanged(String),
     RoiYChanged(String),
     RoiWidthChanged(String),
@@ -54,6 +57,8 @@ pub struct CannotMaxApp {
     model_path_text: String,
     maa_library_path_text: String,
     ocr_model_path_text: String,
+    deepseek_cli_path_text: String,
+    deepseek_device_text: String,
     busy: bool,
 }
 
@@ -68,6 +73,8 @@ impl CannotMaxApp {
             model_path_text: config.model_path.display().to_string(),
             maa_library_path_text: config.maa_library_path.display().to_string(),
             ocr_model_path_text: config.ocr_model_path.display().to_string(),
+            deepseek_cli_path_text: config.deepseek_cli_path.display().to_string(),
+            deepseek_device_text: config.deepseek_device.clone(),
             roi_x: default_roi.x.to_string(),
             roi_y: default_roi.y.to_string(),
             roi_width: default_roi.width.to_string(),
@@ -102,6 +109,8 @@ impl CannotMaxApp {
         self.config.model_path = self.model_path_text.clone().into();
         self.config.maa_library_path = self.maa_library_path_text.clone().into();
         self.config.ocr_model_path = self.ocr_model_path_text.clone().into();
+        self.config.deepseek_cli_path = self.deepseek_cli_path_text.clone().into();
+        self.config.deepseek_device = self.deepseek_device_text.clone();
         self.config.roi = self.current_roi().filter(|roi| !roi.is_empty());
         self.status = match self.config.save() {
             Ok(()) => "配置已保存".to_string(),
@@ -180,6 +189,8 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             app.config.model_path = app.model_path_text.clone().into();
             app.config.maa_library_path = app.maa_library_path_text.clone().into();
             app.config.ocr_model_path = app.ocr_model_path_text.clone().into();
+            app.config.deepseek_cli_path = app.deepseek_cli_path_text.clone().into();
+            app.config.deepseek_device = app.deepseek_device_text.clone();
             app.config.roi = app.current_roi().filter(|roi| !roi.is_empty());
             let _ = app.config.save();
 
@@ -269,6 +280,20 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             app.resources_summary = summarize_runtime(&app.config);
             Task::none()
         }
+        Message::DeepseekCliPathChanged(value) => {
+            app.deepseek_cli_path_text = value;
+            Task::none()
+        }
+        Message::DeepseekModelSelected(value) => {
+            app.config.deepseek_model = value;
+            let _ = app.config.save();
+            app.resources_summary = summarize_runtime(&app.config);
+            Task::none()
+        }
+        Message::DeepseekDeviceChanged(value) => {
+            app.deepseek_device_text = value;
+            Task::none()
+        }
         Message::RoiXChanged(value) => {
             app.roi_x = value;
             Task::none()
@@ -343,8 +368,18 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
         text_input("MAA 动态库路径", &app.maa_library_path_text)
             .on_input(Message::MaaLibraryPathChanged),
         text_input("OCR 模型目录", &app.ocr_model_path_text).on_input(Message::OcrModelPathChanged),
+        text_input("deepseek-ocr-cli 路径", &app.deepseek_cli_path_text)
+            .on_input(Message::DeepseekCliPathChanged),
         pick_list(
-            vec![OcrBackend::Maa, OcrBackend::PaddleOcrVl],
+            DeepseekCliModel::ALL.to_vec(),
+            Some(app.config.deepseek_model),
+            Message::DeepseekModelSelected
+        )
+        .placeholder("选择 deepseek-ocr 模型"),
+        text_input("PaddleOCR-VL 设备", &app.deepseek_device_text)
+            .on_input(Message::DeepseekDeviceChanged),
+        pick_list(
+            vec![OcrBackend::Maa, OcrBackend::DeepseekCli],
             Some(app.config.ocr_backend),
             Message::OcrBackendSelected
         )

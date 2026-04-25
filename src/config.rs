@@ -1,5 +1,5 @@
 use crate::core::{CaptureSource, GameMode, Roi};
-use crate::ocr::OcrBackend;
+use crate::ocr::{DeepseekCliModel, OcrBackend};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -16,6 +16,9 @@ pub struct AppConfig {
     pub maa_library_path: PathBuf,
     pub ocr_model_path: PathBuf,
     pub ocr_backend: OcrBackend,
+    pub deepseek_cli_path: PathBuf,
+    pub deepseek_model: DeepseekCliModel,
+    pub deepseek_device: String,
 }
 
 impl Default for AppConfig {
@@ -35,6 +38,12 @@ impl Default for AppConfig {
             maa_library_path: workspace_root.join("maa").join("MaaFramework.dll"),
             ocr_model_path: workspace_root.join("maa").join("model").join("ocr"),
             ocr_backend: OcrBackend::Maa,
+            deepseek_cli_path: workspace_root
+                .join("tools")
+                .join("deepseek-ocr")
+                .join("deepseek-ocr-cli.exe"),
+            deepseek_model: DeepseekCliModel::PaddleOcrVl,
+            deepseek_device: "cpu".to_string(),
         }
     }
 }

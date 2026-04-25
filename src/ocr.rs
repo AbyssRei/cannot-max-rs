@@ -6,21 +6,58 @@ use maa_framework::tasker::Tasker;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
+use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
+use std::thread;
+use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum OcrBackend {
     #[default]
     Maa,
-    PaddleOcrVl,
+    #[serde(alias = "PaddleOcrVl")]
+    DeepseekCli,
 }
 
 impl fmt::Display for OcrBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Maa => f.write_str("MAA OCR"),
+            Self::DeepseekCli => f.write_str("deepseek-ocr.rs CLI"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DeepseekCliModel {
+    DeepseekOcr,
+    #[default]
+    PaddleOcrVl,
+    DotsOcr,
+}
+
+impl DeepseekCliModel {
+    pub const ALL: [Self; 3] = [Self::DeepseekOcr, Self::PaddleOcrVl, Self::DotsOcr];
+
+    pub fn as_id(self) -> &'static str {
+        match self {
+            Self::DeepseekOcr => "deepseek-ocr",
+            Self::PaddleOcrVl => "paddleocr-vl",
+            Self::DotsOcr => "dots-ocr",
+        }
+    }
+}
+
+impl fmt::Display for DeepseekCliModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DeepseekOcr => f.write_str("DeepSeek-OCR"),
             Self::PaddleOcrVl => f.write_str("PaddleOCR-VL"),
+            Self::DotsOcr => f.write_str("DotsOCR"),
         }
     }
 }
@@ -37,7 +74,7 @@ static MAA_LOAD_RESULT: OnceLock<Result<Option<PathBuf>, String>> = OnceLock::ne
 pub fn recognize_count(image: &GrayImage, config: &AppConfig) -> Result<Option<OcrValue>, String> {
     match config.ocr_backend {
         OcrBackend::Maa => recognize_with_maa(image, config),
-        OcrBackend::PaddleOcrVl => recognize_with_paddle_ocr_vl(image),
+        OcrBackend::DeepseekCli => recognize_with_deepseek_cli(image, config),
     }
 }
 
@@ -68,7 +105,22 @@ pub fn ocr_hint(config: &AppConfig) -> String {
     let model = resolve_ocr_model_path(config)
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "未找到".to_string());
-    format!("OCR 后端: {} | OCR 模型目录: {model}", config.ocr_backend)
+    let enhancement = match resolve_deepseek_cli_path(config) {
+        Some(path) => format!(
+            "增强 OCR CLI: {} | 模型: {} | 设备: {}",
+            path.display(),
+            config.deepseek_model,
+            config.deepseek_device
+        ),
+        None => format!(
+            "增强 OCR CLI: 未找到 | 模型: {} | 设备: {}",
+            config.deepseek_model, config.deepseek_device
+        ),
+    };
+    format!(
+        "OCR 后端: {} | OCR 模型目录: {model} | {enhancement}",
+        config.ocr_backend
+    )
 }
 
 fn recognize_with_maa(image: &GrayImage, config: &AppConfig) -> Result<Option<OcrValue>, String> {
@@ -157,11 +209,71 @@ fn parse_maa_ocr_detail(detail: serde_json::Value) -> Result<Option<OcrValue>, S
     Ok(None)
 }
 
-fn recognize_with_paddle_ocr_vl(_image: &GrayImage) -> Result<Option<OcrValue>, String> {
-    Err(
-        "PaddleOCR-VL backend is reserved for deepseek-ocr.rs integration and is not wired yet"
-            .to_string(),
-    )
+fn recognize_with_deepseek_cli(
+    image: &GrayImage,
+    config: &AppConfig,
+) -> Result<Option<OcrValue>, String> {
+    let cli = resolve_deepseek_cli_path(config).ok_or_else(|| {
+        "deepseek-ocr-cli not found; set the CLI path or add it to PATH".to_string()
+    })?;
+
+    let temp_path = temp_image_path("cannot-max-count");
+    DynamicImage::ImageLuma8(image.clone())
+        .save(&temp_path)
+        .map_err(|error| format!("failed to write temporary OCR image: {error}"))?;
+
+    let prompt = "<image>\nRead only the Arabic numeral in this cropped game counter image. Reply with digits only. If uncertain, still return only the most likely digits.";
+    let model_id = config.deepseek_model.as_id();
+
+    let mut child = Command::new(&cli)
+        .arg("--model")
+        .arg(model_id)
+        .arg("--prompt")
+        .arg(prompt)
+        .arg("--image")
+        .arg(&temp_path)
+        .arg("--device")
+        .arg(config.deepseek_device.trim())
+        .arg("--max-new-tokens")
+        .arg("16")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to launch deepseek-ocr-cli: {error}"))?;
+
+    let output = wait_with_timeout(&mut child, Duration::from_secs(20))
+        .map_err(|error| format!("deepseek-ocr-cli invocation failed: {error}"))?;
+
+    let _ = fs::remove_file(&temp_path);
+
+    if !output.status.success() {
+        return Err(format!(
+            "deepseek-ocr-cli failed for model {}: {}",
+            config.deepseek_model,
+            summarize_cli_failure(&output)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut digits = extract_digits(&stdout);
+    if digits.is_empty() {
+        digits = extract_digits(&stderr);
+    }
+    if digits.is_empty() {
+        return Err(format!(
+            "deepseek-ocr-cli returned no usable digits for model {}. stdout: {} | stderr: {}",
+            config.deepseek_model,
+            clean_diagnostic(&stdout),
+            clean_diagnostic(&stderr)
+        ));
+    }
+
+    Ok(Some(OcrValue {
+        text: digits,
+        confidence: 0.85,
+        backend: OcrBackend::DeepseekCli,
+    }))
 }
 
 fn resolve_ocr_model_path(config: &AppConfig) -> Option<PathBuf> {
@@ -174,6 +286,21 @@ fn resolve_ocr_model_path(config: &AppConfig) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.exists())
 }
 
+pub fn resolve_deepseek_cli_path(config: &AppConfig) -> Option<PathBuf> {
+    let candidates = [
+        config.deepseek_cli_path.clone(),
+        PathBuf::from("deepseek-ocr-cli.exe"),
+        PathBuf::from("deepseek-ocr-cli"),
+    ];
+
+    candidates.into_iter().find(|path| {
+        if path.components().count() == 1 {
+            return true;
+        }
+        path.exists()
+    })
+}
+
 fn candidate_library_paths(config: &AppConfig) -> Vec<PathBuf> {
     let mut paths = vec![config.maa_library_path.clone()];
 
@@ -183,4 +310,100 @@ fn candidate_library_paths(config: &AppConfig) -> Vec<PathBuf> {
     }
 
     paths
+}
+
+fn extract_digits(text: &str) -> String {
+    text.lines()
+        .filter_map(candidate_digits)
+        .max_by_key(|digits| digits.len())
+        .or_else(|| candidate_digits(text))
+        .unwrap_or_default()
+}
+
+fn temp_image_path(prefix: &str) -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{now}.png"))
+}
+
+fn candidate_digits(text: &str) -> Option<String> {
+    let stripped = text
+        .trim()
+        .trim_matches('`')
+        .replace("\\n", " ")
+        .replace('\r', " ");
+    let digits: String = stripped
+        .chars()
+        .filter(|char| char.is_ascii_digit())
+        .collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<std::process::Output, String> {
+    let start = Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("timed out after {}s", timeout.as_secs()));
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => return collect_output(child, status),
+            Ok(None) => thread::sleep(Duration::from_millis(100)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed while waiting for process: {error}"));
+            }
+        }
+    }
+}
+
+fn collect_output(child: &mut Child, status: ExitStatus) -> Result<std::process::Output, String> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+
+    if let Some(mut pipe) = child.stdout.take() {
+        pipe.read_to_end(&mut stdout)
+            .map_err(|error| format!("failed to read stdout: {error}"))?;
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_end(&mut stderr)
+            .map_err(|error| format!("failed to read stderr: {error}"))?;
+    }
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn summarize_cli_failure(output: &std::process::Output) -> String {
+    let code = exit_code_hint(output.status);
+    let stdout = clean_diagnostic(&String::from_utf8_lossy(&output.stdout));
+    let stderr = clean_diagnostic(&String::from_utf8_lossy(&output.stderr));
+    format!("status {code}; stdout: {stdout}; stderr: {stderr}")
+}
+
+fn clean_diagnostic(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let compact = compact.trim();
+    if compact.is_empty() {
+        "(empty)".to_string()
+    } else if compact.len() > 240 {
+        format!("{}...", &compact[..240])
+    } else {
+        compact.to_string()
+    }
+}
+
+fn exit_code_hint(status: ExitStatus) -> String {
+    status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "terminated by signal".to_string())
 }
