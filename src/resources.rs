@@ -15,6 +15,8 @@ pub struct ResourceStore {
     pub root: PathBuf,
     pub templates: Vec<MonsterTemplate>,
     pub empty_thumbnail: Option<GrayImage>,
+    pub skipped_templates: usize,
+    pub diagnostics: Vec<String>,
 }
 
 impl ResourceStore {
@@ -22,7 +24,14 @@ impl ResourceStore {
         let root = config.resource_root.clone();
         let csv_path = root.join("monster.csv");
         if !csv_path.exists() {
-            return Err(format!("missing resource file: {}", csv_path.display()));
+            return Ok(Self {
+                root,
+                diagnostics: vec![format!(
+                    "缺少资源清单 {}，已启用缺图可运行模式",
+                    csv_path.display()
+                )],
+                ..Self::default()
+            });
         }
 
         let mut reader = csv::ReaderBuilder::new()
@@ -41,6 +50,8 @@ impl ResourceStore {
 
         let image_root = root.join("images");
         let mut templates = Vec::new();
+        let mut skipped_templates = 0usize;
+        let mut diagnostics = Vec::new();
 
         for record in reader.records() {
             let record = record.map_err(|error| error.to_string())?;
@@ -56,6 +67,7 @@ impl ResourceStore {
 
             let path = image_root.join(format!("{name}.png"));
             let Some(thumbnail) = load_thumbnail(&path) else {
+                skipped_templates += 1;
                 continue;
             };
 
@@ -68,23 +80,49 @@ impl ResourceStore {
 
         let empty_thumbnail = load_thumbnail(&image_root.join("empty.png"));
 
+        if templates.is_empty() {
+            diagnostics.push(format!(
+                "未加载到任何模板图片，当前以缺图可运行模式继续；请检查 {}",
+                image_root.display()
+            ));
+        } else if skipped_templates > 0 {
+            diagnostics.push(format!("有 {skipped_templates} 个模板图片缺失或损坏，已自动跳过"));
+        }
+
         Ok(Self {
             root,
             templates,
             empty_thumbnail,
+            skipped_templates,
+            diagnostics,
         })
     }
 
     pub fn summary(&self) -> String {
+        let mode_hint = if self.templates.is_empty() {
+            "缺图可运行"
+        } else {
+            "资源已就绪"
+        };
+
+        let diagnostics = if self.diagnostics.is_empty() {
+            String::new()
+        } else {
+            format!(" | 提示: {}", self.diagnostics.join("；"))
+        };
+
         format!(
-            "资源目录: {} | 模板数: {} | 空模板: {}",
+            "资源目录: {} | 模板数: {} | 跳过模板: {} | 空模板: {} | {}{}",
             self.root.display(),
             self.templates.len(),
+            self.skipped_templates,
             if self.empty_thumbnail.is_some() {
                 "已加载"
             } else {
                 "缺失"
-            }
+            },
+            mode_hint,
+            diagnostics
         )
     }
 }
@@ -118,4 +156,45 @@ fn crop_avatar(image: DynamicImage) -> GrayImage {
         bottom.saturating_sub(top).max(1),
     )
     .to_image()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResourceStore;
+    use crate::config::AppConfig;
+    use crate::core::{CaptureSource, GameMode, Roi};
+    use crate::ocr::{DeepseekCliModel, OcrBackend};
+    use std::path::PathBuf;
+
+    fn empty_config_for_root(root: PathBuf) -> AppConfig {
+        AppConfig {
+            schema_version: AppConfig::schema_version(),
+            last_capture_source: Some(CaptureSource::Monitor(1)),
+            game_mode: GameMode::Pc,
+            invest_mode: false,
+            roi: Some(Roi::default()),
+            model_path: PathBuf::from("model.safetensors"),
+            resource_root: root,
+            maa_library_path: PathBuf::from("maafw/MaaFramework.dll"),
+            ocr_model_path: PathBuf::from("maafw/model/ocr"),
+            ocr_backend: OcrBackend::Maa,
+            deepseek_cli_path: PathBuf::from("deepseek-ocr-cli.exe"),
+            deepseek_model: DeepseekCliModel::PaddleOcrVl,
+            deepseek_device: "cpu".to_string(),
+        }
+    }
+
+    #[test]
+    fn load_is_graceful_when_resources_are_missing() {
+        let root = std::env::temp_dir().join("cannot-max-rs-missing-resources");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let config = empty_config_for_root(root.clone());
+        let store = ResourceStore::load(&config).expect("missing resources should not fail");
+
+        assert_eq!(store.root, root);
+        assert!(store.templates.is_empty());
+        assert_eq!(store.skipped_templates, 0);
+        assert!(store.summary().contains("缺图可运行"));
+    }
 }

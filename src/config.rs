@@ -25,26 +25,18 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        let workspace_root = Self::workspace_root();
-        let resource_root = workspace_root.join("resources");
-
         Self {
             schema_version: Self::schema_version(),
             last_capture_source: None,
             game_mode: GameMode::Pc,
             invest_mode: false,
             roi: None,
-            model_path: workspace_root
-                .join("models")
-                .join("cannot-max-v1.safetensors"),
-            resource_root,
-            maa_library_path: workspace_root.join("maa").join("MaaFramework.dll"),
-            ocr_model_path: workspace_root.join("maa").join("model").join("ocr"),
+            model_path: PathBuf::from("models/cannot-max-v1.safetensors"),
+            resource_root: PathBuf::from("resources"),
+            maa_library_path: PathBuf::from("maafw/MaaFramework.dll"),
+            ocr_model_path: PathBuf::from("maafw/model/ocr"),
             ocr_backend: OcrBackend::Maa,
-            deepseek_cli_path: workspace_root
-                .join("tools")
-                .join("deepseek-ocr")
-                .join("deepseek-ocr-cli.exe"),
+            deepseek_cli_path: PathBuf::from("tools/deepseek-ocr/deepseek-ocr-cli.exe"),
             deepseek_model: DeepseekCliModel::PaddleOcrVl,
             deepseek_device: "cpu".to_string(),
         }
@@ -122,28 +114,22 @@ impl AppConfig {
             self.schema_version = Self::schema_version();
         }
 
-        let workspace_root = Self::workspace_root();
-        let new_resource_root = workspace_root.join("resources");
+        let defaults = Self::default();
 
-        if self.resource_root.as_os_str().is_empty()
-            || !self.resource_root.exists()
-        {
-            self.resource_root = new_resource_root;
+        if self.resource_root.as_os_str().is_empty() {
+            self.resource_root = defaults.resource_root;
         }
 
         if self.maa_library_path.as_os_str().is_empty() {
-            self.maa_library_path = workspace_root.join("maa").join("MaaFramework.dll");
+            self.maa_library_path = defaults.maa_library_path;
         }
 
         if self.ocr_model_path.as_os_str().is_empty() {
-            self.ocr_model_path = workspace_root.join("maa").join("model").join("ocr");
+            self.ocr_model_path = defaults.ocr_model_path;
         }
 
         if self.deepseek_cli_path.as_os_str().is_empty() {
-            self.deepseek_cli_path = workspace_root
-                .join("tools")
-                .join("deepseek-ocr")
-                .join("deepseek-ocr-cli.exe");
+            self.deepseek_cli_path = defaults.deepseek_cli_path;
         }
 
         self
@@ -153,6 +139,7 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+    use std::path::PathBuf;
 
     #[test]
     fn default_paths_are_not_empty() {
@@ -160,6 +147,7 @@ mod tests {
         assert!(!config.model_path.as_os_str().is_empty());
         assert!(!config.resource_root.as_os_str().is_empty());
         assert!(config.resource_root.ends_with("resources"));
+        assert_eq!(config.maa_library_path, PathBuf::from("maafw/MaaFramework.dll"));
     }
 
     #[test]

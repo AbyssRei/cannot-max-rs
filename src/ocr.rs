@@ -332,7 +332,7 @@ fn resolve_ocr_model_path(config: &AppConfig) -> Option<PathBuf> {
     let candidates = [
         config.ocr_model_path.clone(),
         config.resource_root.join("model").join("ocr"),
-        config.resource_root.join("maa").join("model").join("ocr"),
+        config.resource_root.join("maafw").join("model").join("ocr"),
     ];
 
     candidates.into_iter().find(|path| path.exists())
@@ -358,7 +358,7 @@ fn candidate_library_paths(config: &AppConfig) -> Vec<PathBuf> {
 
     if let Ok(current) = std::env::current_dir() {
         paths.push(current.join("MaaFramework.dll"));
-        paths.push(current.join("maa").join("MaaFramework.dll"));
+        paths.push(current.join("maafw").join("MaaFramework.dll"));
     }
 
     paths
