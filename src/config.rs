@@ -26,7 +26,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         let workspace_root = Self::workspace_root();
-        let python_root = workspace_root.join("..").join("cannot-max-py");
+        let resource_root = workspace_root.join("resources");
 
         Self {
             schema_version: Self::schema_version(),
@@ -37,7 +37,7 @@ impl Default for AppConfig {
             model_path: workspace_root
                 .join("models")
                 .join("cannot-max-v1.safetensors"),
-            resource_root: python_root,
+            resource_root,
             maa_library_path: workspace_root.join("maa").join("MaaFramework.dll"),
             ocr_model_path: workspace_root.join("maa").join("model").join("ocr"),
             ocr_backend: OcrBackend::Maa,
@@ -72,9 +72,9 @@ impl AppConfig {
         for start in candidates {
             for ancestor in start.ancestors() {
                 let cargo_toml = ancestor.join("Cargo.toml");
-                let python_workspace = ancestor.join("..").join("cannot-max-py");
+                let resource_dir = ancestor.join("resources");
 
-                if cargo_toml.exists() && python_workspace.exists() {
+                if cargo_toml.exists() || resource_dir.exists() {
                     return ancestor.to_path_buf();
                 }
             }
@@ -122,20 +122,25 @@ impl AppConfig {
             self.schema_version = Self::schema_version();
         }
 
-        if self.resource_root.as_os_str().is_empty() {
-            self.resource_root = Self::workspace_root().join("..").join("cannot-max-py");
+        let workspace_root = Self::workspace_root();
+        let new_resource_root = workspace_root.join("resources");
+
+        if self.resource_root.as_os_str().is_empty()
+            || !self.resource_root.exists()
+        {
+            self.resource_root = new_resource_root;
         }
 
         if self.maa_library_path.as_os_str().is_empty() {
-            self.maa_library_path = Self::workspace_root().join("maa").join("MaaFramework.dll");
+            self.maa_library_path = workspace_root.join("maa").join("MaaFramework.dll");
         }
 
         if self.ocr_model_path.as_os_str().is_empty() {
-            self.ocr_model_path = Self::workspace_root().join("maa").join("model").join("ocr");
+            self.ocr_model_path = workspace_root.join("maa").join("model").join("ocr");
         }
 
         if self.deepseek_cli_path.as_os_str().is_empty() {
-            self.deepseek_cli_path = Self::workspace_root()
+            self.deepseek_cli_path = workspace_root
                 .join("tools")
                 .join("deepseek-ocr")
                 .join("deepseek-ocr-cli.exe");
@@ -154,6 +159,7 @@ mod tests {
         let config = AppConfig::default();
         assert!(!config.model_path.as_os_str().is_empty());
         assert!(!config.resource_root.as_os_str().is_empty());
+        assert!(config.resource_root.ends_with("resources"));
     }
 
     #[test]
