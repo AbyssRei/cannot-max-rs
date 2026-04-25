@@ -17,12 +17,19 @@ pub struct ResourceStore {
     pub empty_thumbnail: Option<GrayImage>,
     pub skipped_templates: usize,
     pub diagnostics: Vec<String>,
+    monster_count: usize,
 }
 
 impl ResourceStore {
     pub fn load(config: &AppConfig) -> Result<Self, String> {
         let root = config.resource_root.clone();
-        let csv_path = root.join("monster.csv");
+        // 优先使用 monster_greenvine.csv，回退到 monster.csv
+        let csv_path = root.join("monster_greenvine.csv");
+        let csv_path = if csv_path.exists() {
+            csv_path
+        } else {
+            root.join("monster.csv")
+        };
         if !csv_path.exists() {
             return Ok(Self {
                 root,
@@ -91,11 +98,16 @@ impl ResourceStore {
 
         Ok(Self {
             root,
+            monster_count: templates.len(),
             templates,
             empty_thumbnail,
             skipped_templates,
             diagnostics,
         })
+    }
+
+    pub fn monster_count(&self) -> usize {
+        self.monster_count
     }
 
     pub fn summary(&self) -> String {
@@ -183,6 +195,8 @@ mod tests {
             deepseek_device: "cpu".to_string(),
             win32_input_method: Win32InputMethodConfig::SendMessageWithCursorPos,
             train_config: TrainConfig::default(),
+            monster_count: 60,
+            field_feature_count: 0,
         }
     }
 

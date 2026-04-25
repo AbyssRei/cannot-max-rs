@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub trait Predictor {
     fn predict(&self, snapshot: &BattleSnapshot) -> Result<PredictionResult, String>;
+    fn is_model_loaded(&self) -> bool;
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,10 @@ impl Predictor for CandlePredictor {
         }
         self.predict_baseline(snapshot)
     }
+
+    fn is_model_loaded(&self) -> bool {
+        self.model_loaded
+    }
 }
 
 impl CandlePredictor {
@@ -48,97 +53,115 @@ impl CandlePredictor {
     ) -> Result<PredictionResult, String> {
         let device = Device::Cpu;
 
-        let left: Vec<f32> = snapshot
-            .units
-            .iter()
-            .filter(|unit| unit.side == Side::Left)
-            .map(|unit| unit.count as f32)
-            .collect();
-        let right: Vec<f32> = snapshot
-            .units
-            .iter()
-            .filter(|unit| unit.side == Side::Right)
-            .map(|unit| unit.count as f32)
-            .collect();
+        // 构建左右单位特征向量
+        let monster_count = 60; // Greenvine 赛季
+        let field_feature_count = 0; // 当前禁用场地特征
 
-        // Build feature vector from units + terrain
-        let mut features = left.clone();
-        features.extend_from_slice(&snapshot.terrain_features);
-        let left_len = features.len();
-        features.extend_from_slice(&right);
-        features.extend_from_slice(&snapshot.terrain_features);
-        let _right_len = features.len() - left_len;
+        let mut left_features = vec![0.0f32; monster_count];
+        let mut right_features = vec![0.0f32; monster_count];
 
-        let tensor = Tensor::from_vec(features.clone(), (1, features.len()), &device)
+        for unit in &snapshot.units {
+            let id: usize = unit.unit_id.parse().unwrap_or(0);
+            if id == 0 || id > monster_count {
+                continue;
+            }
+            match unit.side {
+                Side::Left => left_features[id - 1] = unit.count as f32,
+                Side::Right => right_features[id - 1] = unit.count as f32,
+            }
+        }
+
+        // 构建完整特征向量: [left_monster, left_field, right_monster, right_field]
+        let mut features = left_features.clone();
+        features.extend_from_slice(&vec![0.0f32; field_feature_count]);
+        features.extend_from_slice(&right_features);
+        features.extend_from_slice(&vec![0.0f32; field_feature_count]);
+
+        let total_features = monster_count + field_feature_count;
+
+        // 构建输入张量: (1, total_features * 2)
+        let tensor = Tensor::from_vec(features.clone(), (1, total_features * 2), &device)
             .map_err(|e| e.to_string())?;
 
-        // Placeholder: real UnitAwareTransformer forward pass would go here
-        // using VarMap::load_safetensors and model forward
-        let _ = tensor;
+        // 尝试加载 safetensors 模型并执行前向传播
+        if let Ok(tensors) = candle_core::safetensors::load(&self.model_path, &device) {
+            // 尝试从加载的张量中获取线性层权重
+            if let (Some(w_tensor), Some(b_tensor)) = (tensors.get("w"), tensors.get("b")) {
+                // 线性层前向传播: sigmoid(x * w + b)
+                let logits = tensor.matmul(w_tensor).map_err(|e| e.to_string())?;
+                let logits = logits.broadcast_add(b_tensor).map_err(|e| e.to_string())?;
+                let output = sigmoid_tensor(&logits)?;
 
-        // For now, fall back to baseline even when model file exists
-        Err("UnitAwareTransformer forward not yet wired".to_string())
+                let probability = output
+                    .to_scalar::<f32>()
+                    .map_err(|e| e.to_string())?;
+
+                let probability = if probability.is_nan() || probability.is_infinite() {
+                    0.5f32
+                } else {
+                    probability.clamp(0.0, 1.0)
+                };
+
+                return Ok(build_prediction_result(probability));
+            }
+        }
+
+        // 模型加载或推理失败，回退到基线
+        Err("模型权重加载或前向传播失败".to_string())
     }
 
     fn predict_baseline(
         &self,
         snapshot: &BattleSnapshot,
     ) -> Result<PredictionResult, String> {
-        let device = Device::Cpu;
-        let left: Vec<f32> = snapshot
+        let left_total: f32 = snapshot
             .units
             .iter()
             .filter(|unit| unit.side == Side::Left)
             .map(|unit| unit.count as f32)
-            .collect();
-        let right: Vec<f32> = snapshot
+            .sum();
+        let right_total: f32 = snapshot
             .units
             .iter()
             .filter(|unit| unit.side == Side::Right)
             .map(|unit| unit.count as f32)
-            .collect();
-
-        let left_total = if left.is_empty() {
-            0.0
-        } else {
-            Tensor::from_vec(left.clone(), (left.len(),), &device)
-                .map_err(|error| error.to_string())?
-                .sum_all()
-                .map_err(|error| error.to_string())?
-                .to_scalar::<f32>()
-                .map_err(|error| error.to_string())?
-        };
-        let right_total = if right.is_empty() {
-            0.0
-        } else {
-            Tensor::from_vec(right.clone(), (right.len(),), &device)
-                .map_err(|error| error.to_string())?
-                .sum_all()
-                .map_err(|error| error.to_string())?
-                .to_scalar::<f32>()
-                .map_err(|error| error.to_string())?
-        };
+            .sum();
 
         let delta = right_total - left_total;
         let probability = sigmoid(delta / (left_total + right_total + 1.0));
-        let left_win_rate = (1.0 - probability).clamp(0.0, 1.0);
-        let right_win_rate = probability.clamp(0.0, 1.0);
-        let confidence_band = (right_win_rate - 0.5).abs() * 2.0;
 
-        let winner = if (left_win_rate - right_win_rate).abs() < 0.1 {
-            Winner::TossUp
-        } else if left_win_rate > right_win_rate {
-            Winner::Left
-        } else {
-            Winner::Right
-        };
+        Ok(build_prediction_result(probability))
+    }
+}
 
-        Ok(PredictionResult {
-            left_win_rate,
-            right_win_rate,
-            winner,
-            confidence_band,
-        })
+fn sigmoid_tensor(t: &Tensor) -> Result<Tensor, String> {
+    let neg = t.neg().map_err(|e| e.to_string())?;
+    let exp_neg = neg.exp().map_err(|e| e.to_string())?;
+    let one = Tensor::ones(exp_neg.shape(), exp_neg.dtype(), exp_neg.device()).map_err(|e| e.to_string())?;
+    let denom = one.add(&exp_neg).map_err(|e| e.to_string())?;
+    let one2 = Tensor::ones(denom.shape(), denom.dtype(), denom.device()).map_err(|e| e.to_string())?;
+    one2.div(&denom).map_err(|e| e.to_string())
+}
+
+fn build_prediction_result(probability: f32) -> PredictionResult {
+    let probability = probability.clamp(0.0, 1.0);
+    let left_win_rate = 1.0 - probability;
+    let right_win_rate = probability;
+    let confidence_band = (right_win_rate - 0.5).abs() * 2.0;
+
+    let winner = if (left_win_rate - right_win_rate).abs() < 0.1 {
+        Winner::TossUp
+    } else if left_win_rate > right_win_rate {
+        Winner::Left
+    } else {
+        Winner::Right
+    };
+
+    PredictionResult {
+        left_win_rate,
+        right_win_rate,
+        winner,
+        confidence_band,
     }
 }
 
@@ -174,24 +197,12 @@ impl Predictor for BaselinePredictor {
 
         let delta = right_total - left_total;
         let probability = sigmoid(delta / (left_total + right_total + 1.0));
-        let left_win_rate = (1.0 - probability).clamp(0.0, 1.0);
-        let right_win_rate = probability.clamp(0.0, 1.0);
-        let confidence_band = (right_win_rate - 0.5).abs() * 2.0;
 
-        let winner = if (left_win_rate - right_win_rate).abs() < 0.1 {
-            Winner::TossUp
-        } else if left_win_rate > right_win_rate {
-            Winner::Left
-        } else {
-            Winner::Right
-        };
+        Ok(build_prediction_result(probability))
+    }
 
-        Ok(PredictionResult {
-            left_win_rate,
-            right_win_rate,
-            winner,
-            confidence_band,
-        })
+    fn is_model_loaded(&self) -> bool {
+        false
     }
 }
 
@@ -233,5 +244,17 @@ mod tests {
 
         let result = predictor.predict(&snapshot).unwrap();
         assert!((result.left_win_rate + result.right_win_rate - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn baseline_predictor_is_not_model_loaded() {
+        let predictor = BaselinePredictor::new();
+        assert!(!predictor.is_model_loaded());
+    }
+
+    #[test]
+    fn candle_predictor_nonexistent_model_not_loaded() {
+        let predictor = CandlePredictor::new(PathBuf::from("nonexistent.safetensors"));
+        assert!(!predictor.is_model_loaded());
     }
 }

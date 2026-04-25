@@ -60,6 +60,10 @@ pub struct AppConfig {
     pub win32_input_method: Win32InputMethodConfig,
     #[serde(default)]
     pub train_config: TrainConfig,
+    #[serde(default = "AppConfig::default_monster_count")]
+    pub monster_count: usize,
+    #[serde(default = "AppConfig::default_field_feature_count")]
+    pub field_feature_count: usize,
 }
 
 impl Default for AppConfig {
@@ -80,13 +84,23 @@ impl Default for AppConfig {
             deepseek_device: "cpu".to_string(),
             win32_input_method: Win32InputMethodConfig::default(),
             train_config: TrainConfig::default(),
+            monster_count: Self::default_monster_count(),
+            field_feature_count: Self::default_field_feature_count(),
         }
     }
 }
 
 impl AppConfig {
     pub const fn schema_version() -> u32 {
-        2
+        3
+    }
+
+    pub const fn default_monster_count() -> usize {
+        60
+    }
+
+    pub const fn default_field_feature_count() -> usize {
+        0
     }
 
     pub fn workspace_root() -> PathBuf {

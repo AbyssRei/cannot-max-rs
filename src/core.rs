@@ -3,6 +3,64 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
+// ── 相对比例 ROI（用于多分辨率适配）──
+
+/// 相对比例 ROI，所有值在 0.0~1.0 范围内
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RelativeRoi {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl RelativeRoi {
+    /// 将相对比例 ROI 换算为绝对像素 ROI
+    pub fn to_absolute(self, frame_width: u32, frame_height: u32) -> Roi {
+        Roi {
+            x: (frame_width as f32 * self.x) as u32,
+            y: (frame_height as f32 * self.y) as u32,
+            width: (frame_width as f32 * self.width) as u32,
+            height: (frame_height as f32 * self.height) as u32,
+        }
+    }
+}
+
+// ── 游戏状态（状态机）──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GameState {
+    MainMenu,
+    ModeSelectionUnselected,
+    ModeSelectionSelected,
+    PreBattle,
+    InBattle,
+    Settlement,
+    Finished,
+    Unknown,
+}
+
+impl Default for GameState {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl fmt::Display for GameState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MainMenu => f.write_str("主菜单"),
+            Self::ModeSelectionUnselected => f.write_str("模式选择(未选)"),
+            Self::ModeSelectionSelected => f.write_str("模式选择(已选)"),
+            Self::PreBattle => f.write_str("战前"),
+            Self::InBattle => f.write_str("战斗中"),
+            Self::Settlement => f.write_str("结算"),
+            Self::Finished => f.write_str("已完成"),
+            Self::Unknown => f.write_str("未知"),
+        }
+    }
+}
+
 pub type DeviceId = String;
 pub type WindowId = isize;
 pub type MonitorId = usize;

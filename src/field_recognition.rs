@@ -1,71 +1,72 @@
-use crate::core::Roi;
+use crate::core::RelativeRoi;
 use image::RgbaImage;
 use std::collections::HashMap;
 use std::path::Path;
 
-const ROI_COORDINATES: &[(&str, &[Roi])] = &[
+/// 场地识别 ROI 坐标（相对比例，适配 720p~1080p+）
+const ROI_COORDINATES_REL: &[(&str, &[RelativeRoi])] = &[
     (
         "altar_vertical",
         &[
-            Roi { x: 910, y: 174, width: 95, height: 104 },
-            Roi { x: 910, y: 429, width: 102, height: 108 },
-            Roi { x: 900, y: 755, width: 120, height: 108 },
+            RelativeRoi { x: 0.4740, y: 0.1611, width: 0.0495, height: 0.0963 },
+            RelativeRoi { x: 0.4740, y: 0.3972, width: 0.0531, height: 0.1000 },
+            RelativeRoi { x: 0.4688, y: 0.6991, width: 0.0625, height: 0.1000 },
         ],
     ),
     (
         "block_parallel",
         &[
-            Roi { x: 694, y: 240, width: 530, height: 122 },
-            Roi { x: 651, y: 614, width: 620, height: 143 },
+            RelativeRoi { x: 0.3615, y: 0.2222, width: 0.2760, height: 0.1130 },
+            RelativeRoi { x: 0.3391, y: 0.5694, width: 0.3229, height: 0.1324 },
         ],
     ),
     (
         "block_vertical",
         &[
-            Roi { x: 647, y: 233, width: 153, height: 523 },
-            Roi { x: 1112, y: 239, width: 159, height: 514 },
+            RelativeRoi { x: 0.3370, y: 0.2157, width: 0.0797, height: 0.4843 },
+            RelativeRoi { x: 0.5792, y: 0.2213, width: 0.0828, height: 0.4759 },
         ],
     ),
     (
         "coil_narrow",
         &[
-            Roi { x: 915, y: 110, width: 85, height: 89 },
-            Roi { x: 815, y: 257, width: 86, height: 98 },
-            Roi { x: 1024, y: 258, width: 79, height: 98 },
-            Roi { x: 790, y: 643, width: 97, height: 102 },
-            Roi { x: 1031, y: 639, width: 102, height: 108 },
+            RelativeRoi { x: 0.4766, y: 0.1019, width: 0.0443, height: 0.0824 },
+            RelativeRoi { x: 0.4245, y: 0.2380, width: 0.0448, height: 0.0907 },
+            RelativeRoi { x: 0.5333, y: 0.2389, width: 0.0411, height: 0.0907 },
+            RelativeRoi { x: 0.4115, y: 0.5954, width: 0.0505, height: 0.0944 },
+            RelativeRoi { x: 0.5369, y: 0.5917, width: 0.0531, height: 0.1000 },
         ],
     ),
     (
         "coil_wide",
         &[
-            Roi { x: 719, y: 181, width: 81, height: 89 },
-            Roi { x: 602, y: 346, width: 81, height: 94 },
-            Roi { x: 578, y: 535, width: 81, height: 95 },
-            Roi { x: 669, y: 759, width: 91, height: 95 },
-            Roi { x: 1159, y: 757, width: 93, height: 92 },
-            Roi { x: 1257, y: 533, width: 94, height: 102 },
-            Roi { x: 1236, y: 344, width: 85, height: 97 },
-            Roi { x: 1120, y: 180, width: 75, height: 91 },
+            RelativeRoi { x: 0.3745, y: 0.1676, width: 0.0422, height: 0.0824 },
+            RelativeRoi { x: 0.3135, y: 0.3204, width: 0.0422, height: 0.0870 },
+            RelativeRoi { x: 0.3010, y: 0.4954, width: 0.0422, height: 0.0880 },
+            RelativeRoi { x: 0.3484, y: 0.7028, width: 0.0474, height: 0.0880 },
+            RelativeRoi { x: 0.6036, y: 0.7009, width: 0.0484, height: 0.0852 },
+            RelativeRoi { x: 0.6547, y: 0.4935, width: 0.0490, height: 0.0944 },
+            RelativeRoi { x: 0.6438, y: 0.3185, width: 0.0443, height: 0.0898 },
+            RelativeRoi { x: 0.5833, y: 0.1667, width: 0.0391, height: 0.0843 },
         ],
     ),
     (
         "crossbow_top",
-        &[Roi { x: 718, y: 13, width: 484, height: 106 }],
+        &[RelativeRoi { x: 0.3740, y: 0.0120, width: 0.2521, height: 0.0981 }],
     ),
     (
         "fire_side_left",
-        &[Roi { x: 98, y: 246, width: 184, height: 281 }],
+        &[RelativeRoi { x: 0.0510, y: 0.2278, width: 0.0958, height: 0.2602 }],
     ),
     (
         "fire_side_right",
-        &[Roi { x: 1656, y: 430, width: 235, height: 315 }],
+        &[RelativeRoi { x: 0.8625, y: 0.3981, width: 0.1224, height: 0.2917 }],
     ),
     (
         "fire_top",
         &[
-            Roi { x: 532, y: 17, width: 188, height: 97 },
-            Roi { x: 1325, y: 14, width: 60, height: 100 },
+            RelativeRoi { x: 0.2771, y: 0.0157, width: 0.0979, height: 0.0898 },
+            RelativeRoi { x: 0.6891, y: 0.0130, width: 0.0313, height: 0.0926 },
         ],
     ),
 ];
@@ -138,15 +139,16 @@ impl FieldRecognizer {
 
         let width = screenshot.width();
         let height = screenshot.height();
-        if width != 1920 || height != 1080 {
+        // 检查是否为合理的 16:9 分辨率（最低 720p）
+        if width < 1280 || height < 720 {
             return HashMap::new();
         }
 
         let mut detected_classes: Vec<String> = Vec::new();
 
-        for (_location, rois) in ROI_COORDINATES {
-            for roi in *rois {
-                let roi = roi.clamp(width, height);
+        for (_location, rois) in ROI_COORDINATES_REL {
+            for rel_roi in *rois {
+                let roi = rel_roi.to_absolute(width, height).clamp(width, height);
                 let cropped = image::imageops::crop_imm(
                     screenshot,
                     roi.x,

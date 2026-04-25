@@ -97,6 +97,7 @@ pub struct CannotMaxApp {
     action_y_text: String,
     action_text: String,
     busy: bool,
+    model_loaded: bool,
     // Training state
     train_data_file_text: String,
     train_batch_size_text: String,
@@ -115,6 +116,7 @@ pub struct CannotMaxApp {
     auto_fetch_stats: Option<AutoFetchStats>,
     // History state
     history_visible: bool,
+    history_results: Vec<String>,
     special_messages: String,
 }
 
@@ -150,6 +152,7 @@ impl CannotMaxApp {
             train_max_feature_value_text: tc.max_feature_value.to_string(),
             training_progress: None,
             training_busy: false,
+            model_loaded: config.model_path.exists(),
             config,
             catalog: CaptureCatalog::default(),
             resources_summary,
@@ -163,6 +166,7 @@ impl CannotMaxApp {
             auto_fetch_running: false,
             auto_fetch_stats: None,
             history_visible: false,
+            history_results: Vec::new(),
             special_messages: String::new(),
         }
     }
@@ -440,6 +444,19 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                             .collect()
                     };
                     app.prediction = Some(output.prediction.clone());
+                    
+                    // 检查特殊怪物
+                    let handler = crate::special_monster::SpecialMonsterHandler::new();
+                    let left_ids: Vec<String> = output.snapshot.units.iter()
+                        .filter(|u| u.side == crate::core::Side::Left)
+                        .map(|u| u.unit_id.clone())
+                        .collect();
+                    let right_ids: Vec<String> = output.snapshot.units.iter()
+                        .filter(|u| u.side == crate::core::Side::Right)
+                        .map(|u| u.unit_id.clone())
+                        .collect();
+                    app.special_messages = handler.check_special_monsters(&left_ids, &right_ids, &output.prediction.winner);
+                    
                     app.status = format!(
                         "{} | ROI {:?}",
                         output.frame.note,
@@ -686,6 +703,8 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
             button("刷新输入源").on_press(Message::RefreshSources),
             button(if app.busy {
                 "处理中…"
+            } else if !app.model_loaded {
+                "识别并预测（无模型，基线模式）"
             } else {
                 "识别并预测"
             })
@@ -896,11 +915,30 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
     ]
     .spacing(8);
 
+    // Special monster messages
+    let special_panel = if app.special_messages.is_empty() {
+        column![]
+    } else {
+        column![
+            text("特殊怪物提示").size(16),
+            text(&app.special_messages).size(13),
+        ]
+        .spacing(4)
+    };
+
     // History panel (toggle)
     let history_panel = if app.history_visible {
+        let history_content = if app.history_results.is_empty() {
+            vec![text("选择输入源并识别后，将自动匹配历史对局").size(13).into()]
+        } else {
+            app.history_results
+                .iter()
+                .map(|row| text(row).size(13).into())
+                .collect::<Vec<Element<'_, Message>>>()
+        };
         column![
             text("历史对局匹配").size(20),
-            text("选择输入源并识别后，将自动匹配历史对局").size(13),
+            scrollable(column(history_content).spacing(4)).height(200),
         ]
         .spacing(8)
     } else {
@@ -925,7 +963,7 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
                     history_panel,
                 ].spacing(16))
                     .width(Length::FillPortion(1)),
-                container(column![preview_panel, result_panel].spacing(16))
+                container(column![preview_panel, result_panel, special_panel].spacing(16))
                     .width(Length::FillPortion(2)),
             ]
             .spacing(20),

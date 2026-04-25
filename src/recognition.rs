@@ -1,11 +1,12 @@
 use crate::config::AppConfig;
-use crate::core::{BattleSnapshot, CaptureSource, CapturedFrame, RecognizedUnit, Roi, Side};
+use crate::core::{BattleSnapshot, CaptureSource, CapturedFrame, RecognizedUnit, RelativeRoi, Roi, Side};
 use crate::ocr::recognize_count;
 use crate::resources::ResourceStore;
 use image::imageops::FilterType;
 use image::{GrayImage, RgbaImage};
 
-const UNIT_REGIONS: [(f32, f32, f32, f32); 6] = [
+/// 6个单位槽位区域（相对比例，基于战斗区域内部坐标）
+const UNIT_REGIONS_REL: [(f32, f32, f32, f32); 6] = [
     (0.0000, 0.10, 0.1200, 0.77),
     (0.1200, 0.10, 0.2400, 0.77),
     (0.2400, 0.10, 0.3600, 0.77),
@@ -13,6 +14,14 @@ const UNIT_REGIONS: [(f32, f32, f32, f32); 6] = [
     (0.7600, 0.10, 0.8800, 0.77),
     (0.8800, 0.10, 1.0000, 0.77),
 ];
+
+/// 战斗区域 ROI（相对比例，基于全屏坐标）
+const BATTLE_ROI_REL: RelativeRoi = RelativeRoi {
+    x: 0.2479,
+    y: 0.8410,
+    width: 0.5047,
+    height: 0.1100,
+};
 
 pub fn analyze_frame(
     source: &CaptureSource,
@@ -49,7 +58,7 @@ fn recognize_units(
 ) -> Vec<RecognizedUnit> {
     let mut units = Vec::new();
 
-    for (index, region) in UNIT_REGIONS.iter().enumerate() {
+    for (index, region) in UNIT_REGIONS_REL.iter().enumerate() {
         let x = ((frame.width() as f32) * region.0) as u32;
         let y = ((frame.height() as f32) * region.1) as u32;
         let width = (((frame.width() as f32) * region.2) as u32)
@@ -126,7 +135,6 @@ fn compare(left: &GrayImage, right: &GrayImage) -> f32 {
     (1.0 - (total / pixels as f32)).clamp(0.0, 1.0)
 }
 
-#[allow(dead_code)]
 fn compare_ncc(left: &RgbaImage, right: &RgbaImage) -> f32 {
     let pixels = (left.width() * left.height()) as f32;
     if pixels == 0.0 {
@@ -185,17 +193,7 @@ fn crop_rgba(source: &RgbaImage, roi: Roi) -> RgbaImage {
 }
 
 pub fn default_battle_roi(width: u32, height: u32) -> Roi {
-    let x = (width as f32 * 0.2479) as u32;
-    let y = (height as f32 * 0.8410) as u32;
-    let right = (width as f32 * 0.7526) as u32;
-    let bottom = (height as f32 * 0.9510) as u32;
-
-    Roi {
-        x,
-        y,
-        width: right.saturating_sub(x).max(1),
-        height: bottom.saturating_sub(y).max(1),
-    }
+    BATTLE_ROI_REL.to_absolute(width, height).clamp(width, height)
 }
 
 #[cfg(test)]
@@ -205,6 +203,26 @@ mod tests {
     #[test]
     fn default_roi_has_area() {
         let roi = default_battle_roi(1920, 1080);
+        assert!(roi.width > 0);
+        assert!(roi.height > 0);
+    }
+
+    #[test]
+    fn default_roi_720p_has_area() {
+        let roi = default_battle_roi(1280, 720);
+        assert!(roi.width > 0);
+        assert!(roi.height > 0);
+        // 720p 下 ROI 应该比 1080p 小但比例一致
+        let roi_1080 = default_battle_roi(1920, 1080);
+        let ratio_w = roi.width as f32 / roi_1080.width as f32;
+        let ratio_h = roi.height as f32 / roi_1080.height as f32;
+        assert!((ratio_w - 1280.0 / 1920.0).abs() < 0.02);
+        assert!((ratio_h - 720.0 / 1080.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn default_roi_1440p_has_area() {
+        let roi = default_battle_roi(2560, 1440);
         assert!(roi.width > 0);
         assert!(roi.height > 0);
     }

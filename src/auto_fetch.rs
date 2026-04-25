@@ -1,15 +1,12 @@
 use crate::capture::capture_frame;
 use crate::config::AppConfig;
-use crate::core::{AutoFetchStats, CaptureCatalog, CaptureSource, CapturedFrame, Side};
+use crate::core::{AutoFetchStats, CaptureCatalog, CaptureSource, CapturedFrame, GameState, Side};
 use crate::maa_controller::MaaControllerSession;
 use crate::prediction::{CandlePredictor, Predictor};
 use crate::recognition::analyze_frame;
 use crate::resources::ResourceStore;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
-#[allow(dead_code)]
-const MONSTER_COUNT: usize = 61;
 
 /// Relative click points (x_ratio, y_ratio) matching Python auto_fetch
 const RELATIVE_POINTS: [(f32, f32); 5] = [
@@ -19,6 +16,9 @@ const RELATIVE_POINTS: [(f32, f32); 5] = [
     (0.1640, 0.8833), // left gift
     (0.4979, 0.6324), // watch this round
 ];
+
+/// 游戏状态模板匹配阈值
+const STATE_MATCH_THRESHOLD: f32 = 0.7;
 
 pub struct AutoFetch {
     running: Arc<AtomicBool>,
@@ -92,9 +92,11 @@ fn auto_fetch_loop(
     let resources = ResourceStore::load(&config).ok();
     let predictor = CandlePredictor::new(config.model_path.clone());
 
-    let _total_fill_count = 0u32;
-    let _incorrect_fill_count = 0u32;
+    let mut total_fill_count = 0u32;
+    let mut incorrect_fill_count = 0u32;
     let mut current_prediction = 0.5f32;
+    let mut current_state = GameState::Unknown;
+    let mut last_frame_size: (u32, u32) = (1920, 1080);
 
     while running.load(Ordering::Relaxed) {
         // Check duration limit
@@ -114,37 +116,86 @@ fn auto_fetch_loop(
             }
         };
 
-        // Match game state templates (simplified: always try to recognize)
+        last_frame_size = (frame.image.width(), frame.image.height());
+
+        // 判断游戏状态（基于识别结果）
         let snapshot = if let Some(ref res) = resources {
             analyze_frame(&source, &frame, config.roi, res, &config)
         } else {
             continue;
         };
 
-        // If units detected, predict
+        // 状态判断：根据识别结果推断当前状态
         if !snapshot.units.is_empty() {
-            if let Ok(prediction) = predictor.predict(&snapshot) {
-                current_prediction = prediction.right_win_rate;
+            current_state = GameState::PreBattle;
+        } else {
+            // 无单位识别结果，可能是其他状态
+            // 简化处理：保持当前状态或设为 Unknown
+            if current_state == GameState::PreBattle {
+                // 从战前状态进入战斗中
+                current_state = GameState::InBattle;
             }
         }
 
-        // Determine game state and act
-        // Simplified: check if we have units (battle state) or not
-        if !snapshot.units.is_empty() {
-            // Battle state: click based on prediction
-            if is_invest {
-                if current_prediction > 0.5 {
-                    // Invest right
-                    click_relative(&source, &catalog, &config, RELATIVE_POINTS[0]);
-                } else {
-                    // Invest left
-                    click_relative(&source, &catalog, &config, RELATIVE_POINTS[1]);
+        // 根据状态执行对应操作
+        match current_state {
+            GameState::MainMenu => {
+                // 主菜单：点击加入赛事
+                click_relative(&source, &catalog, &config, RELATIVE_POINTS[0], last_frame_size);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            GameState::ModeSelectionUnselected | GameState::ModeSelectionSelected => {
+                // 模式选择：点击自娱自乐
+                click_relative(&source, &catalog, &config, RELATIVE_POINTS[2], last_frame_size);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            GameState::PreBattle => {
+                // 战前：执行识别并预测
+                if let Ok(prediction) = predictor.predict(&snapshot) {
+                    current_prediction = prediction.right_win_rate;
                 }
+
+                // 根据预测结果投资或观战
+                if is_invest {
+                    if current_prediction > 0.5 {
+                        click_relative(&source, &catalog, &config, RELATIVE_POINTS[0], last_frame_size);
+                    } else {
+                        click_relative(&source, &catalog, &config, RELATIVE_POINTS[1], last_frame_size);
+                    }
+                    total_fill_count += 1;
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                } else {
+                    click_relative(&source, &catalog, &config, RELATIVE_POINTS[4], last_frame_size);
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                }
+                current_state = GameState::InBattle;
+            }
+            GameState::InBattle => {
+                // 战斗中：等待战斗结束
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            GameState::Settlement => {
+                // 结算：判断胜负并记录
+                if let Some(result) = calculate_battle_result(&frame) {
+                    if result == Side::Left && current_prediction > 0.5 {
+                        incorrect_fill_count += 1;
+                    } else if result == Side::Right && current_prediction <= 0.5 {
+                        incorrect_fill_count += 1;
+                    }
+                }
+                // 点击返回
+                click_relative(&source, &catalog, &config, RELATIVE_POINTS[0], last_frame_size);
                 std::thread::sleep(std::time::Duration::from_secs(3));
-            } else {
-                // Watch this round
-                click_relative(&source, &catalog, &config, RELATIVE_POINTS[4]);
-                std::thread::sleep(std::time::Duration::from_secs(3));
+                current_state = GameState::Finished;
+            }
+            GameState::Finished => {
+                // 完成：回到主菜单
+                current_state = GameState::MainMenu;
+            }
+            GameState::Unknown => {
+                // 未知状态：尝试点击右下角继续
+                click_relative(&source, &catalog, &config, RELATIVE_POINTS[0], last_frame_size);
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
 
@@ -157,9 +208,10 @@ fn click_relative(
     catalog: &CaptureCatalog,
     config: &AppConfig,
     point: (f32, f32),
+    frame_size: (u32, u32),
 ) {
-    let x = (1920.0 * point.0) as i32;
-    let y = (1080.0 * point.1) as i32;
+    let x = (frame_size.0 as f32 * point.0) as i32;
+    let y = (frame_size.1 as f32 * point.1) as i32;
 
     match MaaControllerSession::for_source(source, catalog, config) {
         Ok(session) => {

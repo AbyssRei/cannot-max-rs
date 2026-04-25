@@ -4,15 +4,19 @@ use candle_nn::{AdamW, Optimizer, VarBuilder, VarMap};
 use std::fs;
 use std::path::Path;
 
-const MONSTER_COUNT: usize = 61;
-const FIELD_FEATURE_COUNT: usize = 12;
-const TOTAL_FEATURE_COUNT: usize = MONSTER_COUNT + FIELD_FEATURE_COUNT;
+// 默认值（Greenvine 赛季）
+const DEFAULT_MONSTER_COUNT: usize = 60;
+const DEFAULT_FIELD_FEATURE_COUNT: usize = 0;
 
 // ── 数据加载与预处理 ──
 
 pub fn load_training_data(
     config: &TrainConfig,
+    monster_count: usize,
+    field_feature_count: usize,
 ) -> Result<(Vec<TrainSample>, Vec<TrainSample>), String> {
+    let total_feature_count = monster_count + field_feature_count;
+
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .flexible(true)
@@ -23,39 +27,39 @@ pub fn load_training_data(
 
     for result in reader.records() {
         let record = result.map_err(|e| format!("读取CSV行失败: {e}"))?;
-        let expected_cols = TOTAL_FEATURE_COUNT * 2 + 2;
+        let expected_cols = total_feature_count * 2 + 2;
         if record.len() < expected_cols {
             continue;
         }
 
-        let mut left_monster = vec![0.0f32; MONSTER_COUNT];
-        let mut right_monster = vec![0.0f32; MONSTER_COUNT];
-        let mut left_field = vec![0.0f32; FIELD_FEATURE_COUNT];
-        let mut right_field = vec![0.0f32; FIELD_FEATURE_COUNT];
+        let mut left_monster = vec![0.0f32; monster_count];
+        let mut right_monster = vec![0.0f32; monster_count];
+        let mut left_field = vec![0.0f32; field_feature_count];
+        let mut right_field = vec![0.0f32; field_feature_count];
 
-        for i in 0..MONSTER_COUNT {
+        for i in 0..monster_count {
             left_monster[i] = record.get(i).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         }
-        for i in 0..FIELD_FEATURE_COUNT {
+        for i in 0..field_feature_count {
             left_field[i] = record
-                .get(MONSTER_COUNT + i)
+                .get(monster_count + i)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0);
         }
-        for i in 0..MONSTER_COUNT {
+        for i in 0..monster_count {
             right_monster[i] = record
-                .get(MONSTER_COUNT + FIELD_FEATURE_COUNT + i)
+                .get(monster_count + field_feature_count + i)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0);
         }
-        for i in 0..FIELD_FEATURE_COUNT {
+        for i in 0..field_feature_count {
             right_field[i] = record
-                .get(MONSTER_COUNT + FIELD_FEATURE_COUNT + MONSTER_COUNT + i)
+                .get(monster_count + field_feature_count + monster_count + i)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0);
         }
 
-        let label_str = record.get(TOTAL_FEATURE_COUNT * 2).unwrap_or("L");
+        let label_str = record.get(total_feature_count * 2).unwrap_or("L");
         let label: f32 = match label_str { "R" => 1.0, _ => 0.0 };
 
         let left_signs: Vec<f32> = left_monster.iter().map(|&v| v.signum()).chain(left_field.iter().map(|_| 1.0f32)).collect();
@@ -121,8 +125,9 @@ impl TrainingPipeline {
         let device = select_device(true)?;
         let device_info = if device.is_cuda() { "CUDA" } else { "CPU" }.to_string();
 
-        let (train_samples, val_samples) = load_training_data(config)?;
+        let (train_samples, val_samples) = load_training_data(config, DEFAULT_MONSTER_COUNT, DEFAULT_FIELD_FEATURE_COUNT)?;
         let data_length = train_samples.len() + val_samples.len();
+        let total_feature_count = DEFAULT_MONSTER_COUNT + DEFAULT_FIELD_FEATURE_COUNT;
 
         fs::create_dir_all(&config.save_dir).map_err(|e| e.to_string())?;
 
@@ -130,7 +135,7 @@ impl TrainingPipeline {
         let varmap = VarMap::new();
         let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
 
-        let feat_dim = TOTAL_FEATURE_COUNT * 2; // left_counts + right_counts
+        let feat_dim = total_feature_count * 2; // left_counts + right_counts
         let w = vb.get((feat_dim, 1), "w").map_err(|e| e.to_string())?;
         let b = vb.get(1, "b").map_err(|e| e.to_string())?;
 
@@ -152,10 +157,10 @@ impl TrainingPipeline {
 
         for epoch in 0..config.epochs {
             let (train_loss, train_acc) = train_one_epoch_simple(
-                &w, &b, &train_samples, &device, &mut optimizer, config.batch_size,
+                &w, &b, &train_samples, &device, &mut optimizer, config.batch_size, total_feature_count,
             )?;
             let (val_loss, val_acc) = evaluate_simple(
-                &w, &b, &val_samples, &device, config.batch_size,
+                &w, &b, &val_samples, &device, config.batch_size, total_feature_count,
             )?;
 
             let save_dir = Path::new(&config.save_dir);
@@ -210,6 +215,7 @@ fn simple_forward(w: &Tensor, b: &Tensor, left_counts: &Tensor, right_counts: &T
 fn train_one_epoch_simple(
     w: &Tensor, b: &Tensor, samples: &[TrainSample], device: &Device,
     optimizer: &mut AdamW, batch_size: usize,
+    total_feature_count: usize,
 ) -> Result<(f32, f32), String> {
     let mut total_loss = 0.0f32;
     let mut correct = 0usize;
@@ -222,8 +228,8 @@ fn train_one_epoch_simple(
         let batch = &samples[start..end];
         let bsz = batch.len();
 
-        let left_counts = batch_to_tensor(batch, |s| &s.left_counts, device, (bsz, TOTAL_FEATURE_COUNT))?;
-        let right_counts = batch_to_tensor(batch, |s| &s.right_counts, device, (bsz, TOTAL_FEATURE_COUNT))?;
+        let left_counts = batch_to_tensor(batch, |s| &s.left_counts, device, (bsz, total_feature_count))?;
+        let right_counts = batch_to_tensor(batch, |s| &s.right_counts, device, (bsz, total_feature_count))?;
         let labels: Vec<f32> = batch.iter().map(|s| s.label).collect();
         let labels = Tensor::from_vec(labels, (bsz,), device).map_err(|e| e.to_string())?;
 
@@ -250,6 +256,7 @@ fn train_one_epoch_simple(
 
 fn evaluate_simple(
     w: &Tensor, b: &Tensor, samples: &[TrainSample], device: &Device, batch_size: usize,
+    total_feature_count: usize,
 ) -> Result<(f32, f32), String> {
     let mut total_loss = 0.0f32;
     let mut correct = 0usize;
@@ -262,8 +269,8 @@ fn evaluate_simple(
         let batch = &samples[start..end];
         let bsz = batch.len();
 
-        let left_counts = batch_to_tensor(batch, |s| &s.left_counts, device, (bsz, TOTAL_FEATURE_COUNT))?;
-        let right_counts = batch_to_tensor(batch, |s| &s.right_counts, device, (bsz, TOTAL_FEATURE_COUNT))?;
+        let left_counts = batch_to_tensor(batch, |s| &s.left_counts, device, (bsz, total_feature_count))?;
+        let right_counts = batch_to_tensor(batch, |s| &s.right_counts, device, (bsz, total_feature_count))?;
         let labels: Vec<f32> = batch.iter().map(|s| s.label).collect();
         let labels = Tensor::from_vec(labels, (bsz,), device).map_err(|e| e.to_string())?;
 
