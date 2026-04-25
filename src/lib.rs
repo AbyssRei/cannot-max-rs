@@ -2,6 +2,7 @@ pub mod app;
 pub mod capture;
 pub mod config;
 pub mod core;
+pub mod maa_controller;
 pub mod ocr;
 pub mod prediction;
 pub mod recognition;

@@ -3,12 +3,9 @@ use crate::core::{
     AdbDeviceInfo, CaptureCatalog, CaptureSource, CapturedFrame, DesktopWindowInfo, GameMode,
     MonitorInfo,
 };
+use crate::maa_controller::MaaControllerSession;
 use image::{ImageBuffer, Rgba, RgbaImage};
-use maa_framework::buffer::MaaImageBuffer;
-use maa_framework::common::{Win32InputMethod, Win32ScreencapMethod};
-use maa_framework::controller::{AdbControllerBuilder, Controller};
 use maa_framework::toolkit::Toolkit;
-use std::ffi::c_void;
 use window_enumerator::WindowEnumerator;
 use windows_capture::dxgi_duplication_api::DxgiDuplicationApi;
 use windows_capture::monitor::Monitor;
@@ -114,64 +111,16 @@ fn capture_adb(address: &str, catalog: &CaptureCatalog) -> Result<CapturedFrame,
     let device = catalog
         .find_adb(address)
         .ok_or_else(|| format!("ADB device not found: {address}"))?;
-    let controller = AdbControllerBuilder::new(&device.adb_path.to_string_lossy(), address)
-        .build()
-        .map_err(|error| error.to_string())?;
-
-    capture_with_maa_controller(controller, format!("ADB 截图: {address}"))
+    let session = MaaControllerSession::from_adb(device, address)?;
+    session.capture_frame(format!("ADB 截图: {address}"))
 }
 
 fn capture_window(hwnd: isize, catalog: &CaptureCatalog) -> Result<CapturedFrame, String> {
     let window = catalog
         .find_window(hwnd)
         .ok_or_else(|| format!("window not found: {hwnd}"))?;
-    let controller = Controller::new_win32(
-        hwnd as *mut c_void,
-        Win32ScreencapMethod::FRAME_POOL.bits(),
-        Win32InputMethod::SEIZE.bits(),
-        Win32InputMethod::SEIZE.bits(),
-    )
-    .map_err(|error| error.to_string())?;
-
-    capture_with_maa_controller(
-        controller,
-        format!("Windows 窗口截图: {} ({})", window.title, window.class_name),
-    )
-}
-
-fn capture_with_maa_controller(
-    controller: Controller,
-    note: String,
-) -> Result<CapturedFrame, String> {
-    let connect_job = controller
-        .post_connection()
-        .map_err(|error| error.to_string())?;
-    let connect_status = controller.wait(connect_job);
-    if !connect_status.succeeded() {
-        return Err(format!("MAA connection failed: {connect_status}"));
-    }
-
-    let screencap_job = controller
-        .post_screencap()
-        .map_err(|error| error.to_string())?;
-    let screencap_status = controller.wait(screencap_job);
-    if !screencap_status.succeeded() {
-        return Err(format!("MAA screencap failed: {screencap_status}"));
-    }
-
-    let image = controller
-        .cached_image()
-        .map_err(|error| error.to_string())
-        .and_then(maa_image_to_rgba)?;
-
-    Ok(CapturedFrame { image, note })
-}
-
-fn maa_image_to_rgba(buffer: MaaImageBuffer) -> Result<RgbaImage, String> {
-    let dynamic = buffer
-        .to_dynamic_image()
-        .map_err(|error| format!("failed to decode MAA image: {error}"))?;
-    Ok(dynamic.to_rgba8())
+    let session = MaaControllerSession::from_window(hwnd, window)?;
+    session.capture_frame(format!("Windows 窗口截图: {} ({})", window.title, window.class_name))
 }
 
 fn capture_monitor(index: usize, _config: &AppConfig) -> Result<CapturedFrame, String> {
