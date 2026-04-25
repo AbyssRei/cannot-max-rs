@@ -38,7 +38,7 @@ pub fn capture_frame(
 ) -> Result<CapturedFrame, String> {
     match source {
         CaptureSource::Adb(address) => capture_adb(address, catalog),
-        CaptureSource::DesktopWindow(hwnd) => capture_window(*hwnd, catalog),
+        CaptureSource::DesktopWindow(hwnd) => capture_window(*hwnd, catalog, config),
         CaptureSource::Monitor(index) => capture_monitor(*index, config),
     }
 }
@@ -115,11 +115,15 @@ fn capture_adb(address: &str, catalog: &CaptureCatalog) -> Result<CapturedFrame,
     session.capture_frame(format!("ADB 截图: {address}"))
 }
 
-fn capture_window(hwnd: isize, catalog: &CaptureCatalog) -> Result<CapturedFrame, String> {
+fn capture_window(
+    hwnd: isize,
+    catalog: &CaptureCatalog,
+    config: &AppConfig,
+) -> Result<CapturedFrame, String> {
     let window = catalog
         .find_window(hwnd)
         .ok_or_else(|| format!("window not found: {hwnd}"))?;
-    let session = MaaControllerSession::from_window(hwnd, window)?;
+    let session = MaaControllerSession::from_window(hwnd, window, config.win32_input_method)?;
     session.capture_frame(format!("Windows 窗口截图: {} ({})", window.title, window.class_name))
 }
 

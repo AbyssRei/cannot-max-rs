@@ -1,6 +1,6 @@
 use crate::automation::{AutomationAction, execute_action};
 use crate::capture::discover_sources;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, Win32InputMethodConfig};
 use crate::core::{AnalysisOutput, CaptureCatalog, GameMode, PredictionResult, SourceChoice};
 use crate::ocr::{DeepseekCliModel, OcrBackend, library_hint, ocr_hint};
 use crate::pipeline::AnalysisPipeline;
@@ -45,6 +45,7 @@ pub enum Message {
     SendInputText,
     SendInactive,
     AutomationFinished(Result<String, String>),
+    Win32InputMethodSelected(Win32InputMethodConfig),
     SaveConfig,
 }
 
@@ -312,6 +313,12 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 Message::AutomationFinished,
             )
         }
+        Message::Win32InputMethodSelected(method) => {
+            app.config.win32_input_method = method;
+            let _ = app.config.save();
+            app.status = format!("Win32 输入方法已切换为: {method}");
+            Task::none()
+        }
         Message::AutomationFinished(result) => {
             app.busy = false;
             app.status = match result {
@@ -476,6 +483,12 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
 
     let automation_panel = column![
         text("自动化操作（MAA）").size(20),
+        pick_list(
+            Win32InputMethodConfig::ALL.to_vec(),
+            Some(app.config.win32_input_method),
+            Message::Win32InputMethodSelected
+        )
+        .placeholder("选择 Win32 输入方法（仅窗口源）"),
         row![
             text_input("x", &app.action_x_text)
                 .on_input(Message::ActionXChanged)
@@ -497,7 +510,7 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
                 .on_press_maybe((!app.busy).then_some(Message::SendInactive)),
         ]
         .spacing(8),
-        text("提示：仅 ADB/窗口源支持自动化；显示器源会返回失败。MAA 路径需配置正确。")
+        text("提示：仅 ADB/窗口源支持自动化；显示器源会返回失败。Win32 输入方法仅对窗口源生效。")
             .size(13),
     ]
     .spacing(8);

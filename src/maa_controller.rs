@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, Win32InputMethodConfig};
 use crate::core::{AdbDeviceInfo, CaptureCatalog, CaptureSource, CapturedFrame, DesktopWindowInfo};
 use image::{ImageBuffer, Rgba, RgbaImage};
 use maa_framework::buffer::MaaImageBuffer;
@@ -9,13 +9,14 @@ use std::ffi::c_void;
 #[derive(Debug)]
 pub struct MaaControllerSession {
     controller: Controller,
+    is_win32: bool,
 }
 
 impl MaaControllerSession {
     pub fn for_source(
         source: &CaptureSource,
         catalog: &CaptureCatalog,
-        _config: &AppConfig,
+        config: &AppConfig,
     ) -> Result<Self, String> {
         match source {
             CaptureSource::Adb(address) => {
@@ -28,7 +29,7 @@ impl MaaControllerSession {
                 let window = catalog
                     .find_window(*hwnd)
                     .ok_or_else(|| format!("window not found: {hwnd}"))?;
-                Self::from_window(*hwnd, window)
+                Self::from_window(*hwnd, window, config.win32_input_method)
             }
             CaptureSource::Monitor(index) => Err(format!(
                 "monitor capture is handled separately and cannot build a MAA controller session: #{index}"
@@ -41,21 +42,41 @@ impl MaaControllerSession {
             .build()
             .map_err(|error| error.to_string())?;
 
-        let session = Self { controller };
+        let session = Self {
+            controller,
+            is_win32: false,
+        };
         session.connect()?;
         Ok(session)
     }
 
-    pub fn from_window(hwnd: isize, _window: &DesktopWindowInfo) -> Result<Self, String> {
+    pub fn from_window(
+        hwnd: isize,
+        _window: &DesktopWindowInfo,
+        input_method: Win32InputMethodConfig,
+    ) -> Result<Self, String> {
+        let mouse_input_bits = match input_method {
+            Win32InputMethodConfig::Seize => Win32InputMethod::SEIZE.bits(),
+            Win32InputMethodConfig::SendMessageWithCursorPos => {
+                Win32InputMethod::SEND_MESSAGE_WITH_CURSOR_POS.bits()
+            }
+            Win32InputMethodConfig::SendMessageWithWindowPos => {
+                Win32InputMethod::SEND_MESSAGE_WITH_WINDOW_POS.bits()
+            }
+        };
+
         let controller = Controller::new_win32(
             hwnd as *mut c_void,
             Win32ScreencapMethod::FRAME_POOL.bits(),
-            Win32InputMethod::SEIZE.bits(),
-            Win32InputMethod::SEIZE.bits(),
+            mouse_input_bits,
+            Win32InputMethod::POST_MESSAGE.bits(),
         )
         .map_err(|error| error.to_string())?;
 
-        let session = Self { controller };
+        let session = Self {
+            controller,
+            is_win32: true,
+        };
         session.connect()?;
         Ok(session)
     }
@@ -84,7 +105,19 @@ impl MaaControllerSession {
             .controller
             .post_click(x, y)
             .map_err(|error| error.to_string())?;
-        self.wait_job(id, "click")
+        if self.wait_job(id, "click").is_ok() {
+            return Ok(());
+        }
+
+        if self.is_win32 {
+            let id_v2 = self
+                .controller
+                .post_click_v2(x, y, 0, 1)
+                .map_err(|error| error.to_string())?;
+            return self.wait_job(id_v2, "click(v2)");
+        }
+
+        Err("MAA click failed".to_string())
     }
 
     pub fn input_text(&self, text: &str) -> Result<(), String> {

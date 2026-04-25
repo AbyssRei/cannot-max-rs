@@ -161,7 +161,7 @@ fn crop_avatar(image: DynamicImage) -> GrayImage {
 #[cfg(test)]
 mod tests {
     use super::ResourceStore;
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, Win32InputMethodConfig};
     use crate::core::{CaptureSource, GameMode, Roi};
     use crate::ocr::{DeepseekCliModel, OcrBackend};
     use std::path::PathBuf;
@@ -181,6 +181,7 @@ mod tests {
             deepseek_cli_path: PathBuf::from("deepseek-ocr-cli.exe"),
             deepseek_model: DeepseekCliModel::PaddleOcrVl,
             deepseek_device: "cpu".to_string(),
+            win32_input_method: Win32InputMethodConfig::SendMessageWithCursorPos,
         }
     }
 

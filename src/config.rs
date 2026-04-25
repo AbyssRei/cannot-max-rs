@@ -2,8 +2,43 @@ use crate::core::{CaptureSource, GameMode, Roi};
 use crate::ocr::{DeepseekCliModel, OcrBackend};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Win32InputMethodConfig {
+    Seize,
+    SendMessageWithCursorPos,
+    SendMessageWithWindowPos,
+}
+
+impl Win32InputMethodConfig {
+    pub const ALL: [Self; 3] = [
+        Self::SendMessageWithCursorPos,
+        Self::SendMessageWithWindowPos,
+        Self::Seize,
+    ];
+}
+
+impl Default for Win32InputMethodConfig {
+    fn default() -> Self {
+        Self::SendMessageWithCursorPos
+    }
+}
+
+impl fmt::Display for Win32InputMethodConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::SendMessageWithCursorPos => {
+                "SEND_MESSAGE_WITH_CURSOR_POS（默认，推荐）"
+            }
+            Self::SendMessageWithWindowPos => "SEND_MESSAGE_WITH_WINDOW_POS",
+            Self::Seize => "SEIZE（前台占用）",
+        };
+        write!(f, "{label}")
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -21,6 +56,8 @@ pub struct AppConfig {
     pub deepseek_cli_path: PathBuf,
     pub deepseek_model: DeepseekCliModel,
     pub deepseek_device: String,
+    #[serde(default = "Win32InputMethodConfig::default")]
+    pub win32_input_method: Win32InputMethodConfig,
 }
 
 impl Default for AppConfig {
@@ -39,6 +76,7 @@ impl Default for AppConfig {
             deepseek_cli_path: PathBuf::from("tools/deepseek-ocr/deepseek-ocr-cli.exe"),
             deepseek_model: DeepseekCliModel::PaddleOcrVl,
             deepseek_device: "cpu".to_string(),
+            win32_input_method: Win32InputMethodConfig::default(),
         }
     }
 }
@@ -138,7 +176,7 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::AppConfig;
+    use super::{AppConfig, Win32InputMethodConfig};
     use std::path::PathBuf;
 
     #[test]
@@ -148,6 +186,10 @@ mod tests {
         assert!(!config.resource_root.as_os_str().is_empty());
         assert!(config.resource_root.ends_with("resources"));
         assert_eq!(config.maa_library_path, PathBuf::from("maafw/MaaFramework.dll"));
+        assert_eq!(
+            config.win32_input_method,
+            Win32InputMethodConfig::SendMessageWithCursorPos
+        );
     }
 
     #[test]
