@@ -126,6 +126,35 @@ fn compare(left: &GrayImage, right: &GrayImage) -> f32 {
     (1.0 - (total / pixels as f32)).clamp(0.0, 1.0)
 }
 
+#[allow(dead_code)]
+fn compare_ncc(left: &RgbaImage, right: &RgbaImage) -> f32 {
+    let pixels = (left.width() * left.height()) as f32;
+    if pixels == 0.0 {
+        return 0.0;
+    }
+
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+
+    for (pa, pb) in left.pixels().zip(right.pixels()) {
+        for c in 0..3 {
+            let a = pa[c] as f32 / 255.0;
+            let b = pb[c] as f32 / 255.0;
+            dot += a * b;
+            norm_a += a * a;
+            norm_b += b * b;
+        }
+    }
+
+    let denom = (norm_a * norm_b).sqrt();
+    if denom < 1e-8 {
+        return 0.0;
+    }
+
+    (dot / denom).clamp(0.0, 1.0)
+}
+
 fn crop_count_region(slot: &GrayImage) -> GrayImage {
     let x = ((slot.width() as f32) * 0.46) as u32;
     let y = ((slot.height() as f32) * 0.56) as u32;

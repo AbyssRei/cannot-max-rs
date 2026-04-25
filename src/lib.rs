@@ -1,11 +1,16 @@
 pub mod app;
 pub mod automation;
+pub mod auto_fetch;
 pub mod capture;
 pub mod config;
 pub mod core;
+pub mod field_recognition;
+pub mod history_match;
 pub mod maa_controller;
 pub mod ocr;
 pub mod prediction;
 pub mod recognition;
 pub mod resources;
 pub mod pipeline;
+pub mod special_monster;
+pub mod training;

@@ -73,7 +73,9 @@ fn window_priority(window: &DesktopWindowInfo, game_mode: GameMode) -> (u8, Stri
     let is_game_window = combined.contains("arknights")
         || combined.contains("明日方舟")
         || combined.contains("hypergryph")
-        || combined.contains("prts");
+        || combined.contains("prts")
+        || class_name.contains("unitywndclass")
+        || process_name.contains("arknights");
     let is_emulator_window = combined.contains("emu")
         || combined.contains("bluestacks")
         || combined.contains("mumu")

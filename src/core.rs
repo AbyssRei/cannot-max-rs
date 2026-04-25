@@ -181,6 +181,90 @@ pub struct AnalysisOutput {
     pub prediction: PredictionResult,
 }
 
+// ── 训练相关类型 ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainConfig {
+    pub data_file: PathBuf,
+    pub batch_size: usize,
+    pub test_size: f32,
+    pub embed_dim: usize,
+    pub n_layers: usize,
+    pub num_heads: usize,
+    pub learning_rate: f64,
+    pub epochs: usize,
+    pub seed: u64,
+    pub save_dir: PathBuf,
+    pub max_feature_value: f32,
+    pub weight_decay: f64,
+}
+
+impl Default for TrainConfig {
+    fn default() -> Self {
+        Self {
+            data_file: PathBuf::from("arknights.csv"),
+            batch_size: 1024,
+            test_size: 0.1,
+            embed_dim: 128,
+            n_layers: 3,
+            num_heads: 16,
+            learning_rate: 3e-4,
+            epochs: 200,
+            seed: 42,
+            save_dir: PathBuf::from("models"),
+            max_feature_value: 100.0,
+            weight_decay: 1e-1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainProgress {
+    pub epoch: usize,
+    pub total_epochs: usize,
+    pub train_loss: f32,
+    pub train_acc: f32,
+    pub val_loss: f32,
+    pub val_acc: f32,
+    pub best_acc: f32,
+    pub best_loss: f32,
+    pub elapsed_secs: f64,
+    pub estimated_remaining_secs: f64,
+    pub device_info: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainSample {
+    pub left_signs: Vec<f32>,
+    pub left_counts: Vec<f32>,
+    pub right_signs: Vec<f32>,
+    pub right_counts: Vec<f32>,
+    pub label: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainResult {
+    pub best_acc: f32,
+    pub best_loss: f32,
+    pub total_epochs: usize,
+    pub data_length: usize,
+    pub model_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AutoFetchStats {
+    pub total_fill_count: u32,
+    pub incorrect_fill_count: u32,
+    pub elapsed_secs: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpecialMonsterInfo {
+    pub name: String,
+    pub win_message: String,
+    pub lose_message: String,
+}
+
 impl CaptureCatalog {
     pub fn source_choices(&self, game_mode: GameMode) -> Vec<SourceChoice> {
         let mut sources = Vec::new();

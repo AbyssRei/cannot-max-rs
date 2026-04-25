@@ -1,4 +1,4 @@
-use crate::core::{CaptureSource, GameMode, Roi};
+use crate::core::{CaptureSource, GameMode, Roi, TrainConfig};
 use crate::ocr::{DeepseekCliModel, OcrBackend};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
@@ -58,6 +58,8 @@ pub struct AppConfig {
     pub deepseek_device: String,
     #[serde(default = "Win32InputMethodConfig::default")]
     pub win32_input_method: Win32InputMethodConfig,
+    #[serde(default)]
+    pub train_config: TrainConfig,
 }
 
 impl Default for AppConfig {
@@ -77,13 +79,14 @@ impl Default for AppConfig {
             deepseek_model: DeepseekCliModel::PaddleOcrVl,
             deepseek_device: "cpu".to_string(),
             win32_input_method: Win32InputMethodConfig::default(),
+            train_config: TrainConfig::default(),
         }
     }
 }
 
 impl AppConfig {
     pub const fn schema_version() -> u32 {
-        1
+        2
     }
 
     pub fn workspace_root() -> PathBuf {

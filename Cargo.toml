@@ -15,6 +15,9 @@ window-enumerator = "0.4.1"
 windows-capture = "2.0.0"
 maa-framework = { version = "1.16.0", default-features = false, features = ["toolkit", "adb", "win32", "image", "dynamic"] }
 candle-core = "0.10"
+candle-nn = "0.10"
+ndarray = { version = "0.16", features = ["serde"] }
+rand = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
