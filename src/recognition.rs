@@ -5,14 +5,24 @@ use crate::resources::ResourceStore;
 use image::imageops::FilterType;
 use image::{GrayImage, RgbaImage};
 
-/// 6个单位槽位区域（相对比例，基于战斗区域内部坐标）
-pub const UNIT_REGIONS_REL: [(f32, f32, f32, f32); 6] = [
-    (0.0000, 0.00, 0.1200, 1.00),
-    (0.1225, 0.00, 0.2425, 1.00),
-    (0.2450, 0.00, 0.3650, 1.00),
-    (0.6400, 0.00, 0.7600, 1.00),
-    (0.7600, 0.00, 0.8800, 1.00),
-    (0.8800, 0.00, 1.0000, 1.00),
+/// 6个头像区域（相对比例，基于战斗区域内部坐标）
+pub const AVATAR_REGIONS_REL: [(f32, f32, f32, f32); 6] = [
+    (0.0000, 0.10, 0.1200, 0.77),
+    (0.1200, 0.10, 0.2400, 0.77),
+    (0.2400, 0.10, 0.3600, 0.77),
+    (0.6400, 0.10, 0.7600, 0.77),
+    (0.7600, 0.10, 0.8800, 0.77),
+    (0.8800, 0.10, 1.0000, 0.77),
+];
+
+/// 6个数字区域（相对比例，基于战斗区域内部坐标）
+pub const COUNT_REGIONS_REL: [(f32, f32, f32, f32); 6] = [
+    (0.0300, 0.70, 0.1400, 1.00),
+    (0.1600, 0.70, 0.2700, 1.00),
+    (0.2900, 0.70, 0.4000, 1.00),
+    (0.6100, 0.70, 0.7200, 1.00),
+    (0.7300, 0.70, 0.8400, 1.00),
+    (0.8600, 0.70, 0.9700, 1.00),
 ];
 
 /// 战斗区域 ROI（相对比例，基于全屏坐标）
@@ -58,24 +68,35 @@ fn recognize_units(
 ) -> Vec<RecognizedUnit> {
     let mut units = Vec::new();
 
-    for (index, region) in UNIT_REGIONS_REL.iter().enumerate() {
-        let x = ((frame.width() as f32) * region.0) as u32;
-        let y = ((frame.height() as f32) * region.1) as u32;
-        let width = (((frame.width() as f32) * region.2) as u32)
-            .saturating_sub(x)
+    for (index, (avatar_region, count_region)) in AVATAR_REGIONS_REL.iter().zip(COUNT_REGIONS_REL.iter()).enumerate() {
+        // 从独立头像区域裁切
+        let ax = ((frame.width() as f32) * avatar_region.0) as u32;
+        let ay = ((frame.height() as f32) * avatar_region.1) as u32;
+        let aw = (((frame.width() as f32) * avatar_region.2) as u32)
+            .saturating_sub(ax)
             .max(1);
-        let height = (((frame.height() as f32) * region.3) as u32)
-            .saturating_sub(y)
+        let ah = (((frame.height() as f32) * avatar_region.3) as u32)
+            .saturating_sub(ay)
             .max(1);
-        let slot = image::imageops::crop_imm(frame, x, y, width, height).to_image();
-        let slot = image::imageops::resize(&slot, 48, 48, FilterType::Triangle);
+        let avatar = image::imageops::crop_imm(frame, ax, ay, aw, ah).to_image();
+        let avatar = image::imageops::resize(&avatar, 48, 48, FilterType::Triangle);
 
-        let (unit_id, confidence) = best_template_match(&slot, resources);
+        let (unit_id, confidence) = best_template_match(&avatar, resources);
         if unit_id == "empty" || confidence < 0.45 {
             continue;
         }
 
-        let count_image = crop_count_region(&slot);
+        // 从独立数字区域裁切
+        let cx = ((frame.width() as f32) * count_region.0) as u32;
+        let cy = ((frame.height() as f32) * count_region.1) as u32;
+        let cw = (((frame.width() as f32) * count_region.2) as u32)
+            .saturating_sub(cx)
+            .max(1);
+        let ch = (((frame.height() as f32) * count_region.3) as u32)
+            .saturating_sub(cy)
+            .max(1);
+        let count_image = image::imageops::crop_imm(frame, cx, cy, cw, ch).to_image();
+
         let ocr_value = recognize_count(&count_image, config)
             .ok()
             .flatten()
@@ -88,7 +109,7 @@ fn recognize_units(
                     .map(|count| (count, value.source_label, value.cached))
             });
         let (count, count_source, count_cached) =
-            ocr_value.unwrap_or_else(|| (estimate_count(&slot), "基线估算".to_string(), false));
+            ocr_value.unwrap_or_else(|| (estimate_count(&avatar), "基线估算".to_string(), false));
 
         units.push(RecognizedUnit {
             side: if index < 3 { Side::Left } else { Side::Right },
@@ -156,14 +177,6 @@ fn compare_ncc(left: &RgbaImage, right: &RgbaImage) -> f32 {
     }
 
     (dot / denom).clamp(0.0, 1.0)
-}
-
-fn crop_count_region(slot: &GrayImage) -> GrayImage {
-    let x = ((slot.width() as f32) * 0.46) as u32;
-    let y = ((slot.height() as f32) * 0.56) as u32;
-    let width = slot.width().saturating_sub(x).max(1);
-    let height = slot.height().saturating_sub(y).max(1);
-    image::imageops::crop_imm(slot, x, y, width, height).to_image()
 }
 
 fn estimate_count(slot: &GrayImage) -> u32 {

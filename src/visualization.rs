@@ -1,6 +1,6 @@
 use crate::core::{BattleSnapshot, Roi, Side, UnitAnnotation, VisualizationOverlay};
 use image::{Rgba, RgbaImage};
-use crate::recognition::UNIT_REGIONS_REL;
+use crate::recognition::AVATAR_REGIONS_REL;
 
 /// 可视化渲染器
 pub struct VisualizationRenderer;
@@ -73,9 +73,9 @@ impl VisualizationRenderer {
         annotated
     }
 
-    /// 从 ROI 图中裁剪 6 个槽位图（按 UNIT_REGIONS_REL 顺序）
+    /// 从 ROI 图中裁剪 6 个槽位图（按 AVATAR_REGIONS_REL 顺序）
     pub fn extract_slot_images(roi_image: &RgbaImage) -> Vec<RgbaImage> {
-        UNIT_REGIONS_REL
+        AVATAR_REGIONS_REL
             .iter()
             .map(|region| {
                 let x = ((roi_image.width() as f32) * region.0) as u32;
@@ -95,8 +95,8 @@ impl VisualizationRenderer {
 /// 计算单个单位在ROI图中的边界框
 fn unit_bbox_in_roi(slot: usize, roi_size: (u32, u32)) -> Roi {
     let (roi_w, roi_h) = roi_size;
-    let index = slot.min(UNIT_REGIONS_REL.len().saturating_sub(1));
-    let region = UNIT_REGIONS_REL[index];
+    let index = slot.min(AVATAR_REGIONS_REL.len().saturating_sub(1));
+    let region = AVATAR_REGIONS_REL[index];
 
     let x = ((roi_w as f32) * region.0) as u32;
     let y = ((roi_h as f32) * region.1) as u32;
