@@ -114,6 +114,7 @@ pub struct CannotMaxApp {
     resources_summary: String,
     selected_source: Option<SourceChoice>,
     preview: Option<image::Handle>,
+    slot_previews: Vec<image::Handle>,
     recognized_rows: Vec<String>,
     prediction: Option<PredictionResult>,
     status: String,
@@ -229,6 +230,7 @@ impl CannotMaxApp {
             resources_summary,
             selected_source: None,
             preview: None,
+            slot_previews: Vec::new(),
             recognized_rows: Vec::new(),
             prediction: None,
             status: "正在加载输入源…".to_string(),
@@ -535,15 +537,40 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             match result {
                 Ok(output) => {
                     let frame_image = output.frame.image.clone();
+                    let roi_for_preview = output
+                        .snapshot
+                        .roi
+                        .unwrap_or_else(|| crate::core::Roi {
+                            x: 0,
+                            y: 0,
+                            width: frame_image.width().max(1),
+                            height: frame_image.height().max(1),
+                        })
+                        .clamp(frame_image.width(), frame_image.height());
+                    let roi_image = ::image::imageops::crop_imm(
+                        &frame_image,
+                        roi_for_preview.x,
+                        roi_for_preview.y,
+                        roi_for_preview.width.max(1),
+                        roi_for_preview.height.max(1),
+                    )
+                    .to_image();
+
+                    let slot_images = VisualizationRenderer::extract_slot_images(&roi_image);
+                    app.slot_previews = slot_images
+                        .into_iter()
+                        .map(|img| {
+                            image::Handle::from_rgba(img.width(), img.height(), img.into_raw())
+                        })
+                        .collect();
 
                     // 可视化渲染
                     if app.visualization_enabled {
                         let overlay = VisualizationRenderer::build_overlay(
                             &output.snapshot,
-                            output.snapshot.roi,
-                            output.snapshot.frame_size,
+                            (roi_image.width(), roi_image.height()),
                         );
-                        let annotated = VisualizationRenderer::render_overlay(&frame_image, &overlay);
+                        let annotated = VisualizationRenderer::render_overlay(&roi_image, &overlay);
                         app.visualization_overlay = Some(overlay);
                         app.preview = Some(image::Handle::from_rgba(
                             annotated.width(),
@@ -551,10 +578,11 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                             annotated.into_raw(),
                         ));
                     } else {
+                        app.visualization_overlay = None;
                         app.preview = Some(image::Handle::from_rgba(
-                            frame_image.width(),
-                            frame_image.height(),
-                            frame_image.into_raw(),
+                            roi_image.width(),
+                            roi_image.height(),
+                            roi_image.into_raw(),
                         ));
                     }
 
@@ -1559,9 +1587,31 @@ fn view_history_panel(app: &CannotMaxApp) -> Element<'_, Message> {
 
 fn view_preview(app: &CannotMaxApp) -> Element<'_, Message> {
     if let Some(handle) = &app.preview {
+        let slot_gallery: Element<'_, Message> = if app.slot_previews.is_empty() {
+            text("暂无槽位截图").size(13).into()
+        } else {
+            let items = app
+                .slot_previews
+                .iter()
+                .enumerate()
+                .map(|(idx, slot)| {
+                    column![
+                        text(format!("槽位 {}", idx + 1)).size(12),
+                        image(slot.clone()).width(120).height(80),
+                    ]
+                    .spacing(4)
+                    .into()
+                })
+                .collect::<Vec<Element<'_, Message>>>();
+
+            row(items).spacing(8).into()
+        };
+
         column![
             text("当前预览").size(20),
             image(handle.clone()).width(Length::Fill).height(Length::FillPortion(2)),
+            text("槽位截图").size(16),
+            scrollable(container(slot_gallery).width(Length::Fill)).height(120),
         ]
         .spacing(8)
         .into()
