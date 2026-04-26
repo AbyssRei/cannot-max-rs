@@ -105,15 +105,22 @@ fn recognize_units(
 }
 
 fn best_template_match(slot: &GrayImage, resources: &ResourceStore) -> (String, f32) {
+    // 将灰度槽位转为 RGBA 用于 NCC 匹配
+    let slot_rgba = image::DynamicImage::ImageLuma8(slot.clone()).to_rgba8();
+
     let mut best_id = "empty".to_string();
     let mut best_score = resources
         .empty_thumbnail
         .as_ref()
-        .map(|empty| compare(slot, empty))
+        .map(|empty| {
+            let empty_rgba = image::DynamicImage::ImageLuma8(empty.clone()).to_rgba8();
+            compare_ncc(&slot_rgba, &empty_rgba)
+        })
         .unwrap_or(0.0);
 
     for template in &resources.templates {
-        let score = compare(slot, &template.thumbnail);
+        let template_rgba = image::DynamicImage::ImageLuma8(template.thumbnail.clone()).to_rgba8();
+        let score = compare_ncc(&slot_rgba, &template_rgba);
         if score > best_score {
             best_score = score;
             best_id = template.id.to_string();
@@ -121,18 +128,6 @@ fn best_template_match(slot: &GrayImage, resources: &ResourceStore) -> (String, 
     }
 
     (best_id, best_score)
-}
-
-fn compare(left: &GrayImage, right: &GrayImage) -> f32 {
-    let mut total = 0f32;
-    let pixels = left.width() * left.height();
-
-    for (left_pixel, right_pixel) in left.pixels().zip(right.pixels()) {
-        let diff = (left_pixel[0] as f32 - right_pixel[0] as f32).abs();
-        total += diff / 255.0;
-    }
-
-    (1.0 - (total / pixels as f32)).clamp(0.0, 1.0)
 }
 
 fn compare_ncc(left: &RgbaImage, right: &RgbaImage) -> f32 {

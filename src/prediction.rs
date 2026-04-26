@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 const DEFAULT_MONSTER_COUNT: usize = 60;
 const DEFAULT_FIELD_FEATURE_COUNT: usize = 0;
-const TOPK: usize = 8;
 
 fn se(e: candle_core::Error) -> String { e.to_string() }
 

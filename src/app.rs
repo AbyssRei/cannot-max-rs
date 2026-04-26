@@ -3,7 +3,7 @@ use crate::auto_fetch::AutoFetch;
 use crate::capture::discover_sources;
 use crate::config::{AppConfig, Win32InputMethodConfig};
 use crate::core::{
-    AnalysisOutput, AutoFetchStats, CaptureCatalog, GameMode, PredictionResult, SourceChoice,
+    AnalysisOutput, CaptureCatalog, GameMode, PredictionResult, SourceChoice,
     TrainConfig, TrainProgress, TrainResult,
 };
 use crate::ocr::{DeepseekCliModel, OcrBackend, library_hint, ocr_hint};
@@ -56,6 +56,7 @@ pub enum Message {
     StartTraining,
     TrainingProgress(TrainProgress),
     TrainingFinished(Result<TrainResult, String>),
+    PollTrainingProgress,
     TrainDataFileChanged(String),
     TrainBatchSizeChanged(String),
     TrainEmbedDimChanged(String),
@@ -67,7 +68,6 @@ pub enum Message {
     TrainMaxFeatureValueChanged(String),
     // Auto fetch
     ToggleAutoFetch,
-    AutoFetchProgress(AutoFetchStats),
     InvestModeToggled(bool),
     // History
     ToggleHistoryPanel,
@@ -110,10 +110,10 @@ pub struct CannotMaxApp {
     train_max_feature_value_text: String,
     training_progress: Option<TrainProgress>,
     training_busy: bool,
+    training_receiver: Option<std::sync::mpsc::Receiver<TrainProgress>>,
     // Auto fetch state
     auto_fetch: AutoFetch,
     auto_fetch_running: bool,
-    auto_fetch_stats: Option<AutoFetchStats>,
     // History state
     history_visible: bool,
     history_results: Vec<String>,
@@ -152,6 +152,7 @@ impl CannotMaxApp {
             train_max_feature_value_text: tc.max_feature_value.to_string(),
             training_progress: None,
             training_busy: false,
+            training_receiver: None,
             model_loaded: config.model_path.exists(),
             config,
             catalog: CaptureCatalog::default(),
@@ -164,7 +165,6 @@ impl CannotMaxApp {
             busy: false,
             auto_fetch: AutoFetch::new(),
             auto_fetch_running: false,
-            auto_fetch_stats: None,
             history_visible: false,
             history_results: Vec::new(),
             special_messages: String::new(),
@@ -544,29 +544,19 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             let train_config = app.current_train_config();
 
             let (sender, receiver) = std::sync::mpsc::channel();
+            app.training_receiver = Some(receiver);
             std::thread::spawn(move || {
                 let pipeline = TrainingPipeline::new(train_config);
                 let result = pipeline.run(sender);
                 result
             });
 
+            // 首次轮询训练进度
             Task::perform(
-                async move {
-                    let mut last_progress = None;
-                    while let Ok(progress) = receiver.try_recv() {
-                        last_progress = Some(progress);
-                    }
-                    // Wait for completion
-                    // This is simplified; a proper impl would use a stream
-                    last_progress
+                async {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 },
-                |progress: Option<TrainProgress>| {
-                    if let Some(p) = progress {
-                        Message::TrainingProgress(p)
-                    } else {
-                        Message::TrainingFinished(Err("训练通道关闭".to_string()))
-                    }
-                },
+                |_| Message::PollTrainingProgress,
             )
         }
         Message::TrainingProgress(progress) => {
@@ -576,7 +566,68 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 progress.epoch, progress.total_epochs,
                 progress.train_loss, progress.val_acc, progress.device_info
             );
-            Task::none()
+            // 如果训练尚未完成，继续轮询进度
+            if progress.epoch < progress.total_epochs {
+                // 继续等待下一批进度
+                Task::perform(
+                    async {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    },
+                    |_| Message::PollTrainingProgress,
+                )
+            } else {
+                // 训练完成
+                app.training_busy = false;
+                Task::none()
+            }
+        }
+        Message::PollTrainingProgress => {
+            if let Some(receiver) = &app.training_receiver {
+                let mut last_progress = None;
+                while let Ok(progress) = receiver.try_recv() {
+                    last_progress = Some(progress);
+                }
+
+                if let Some(progress) = last_progress {
+                    if progress.epoch >= progress.total_epochs {
+                        // 训练完成
+                        app.training_busy = false;
+                        app.training_progress = Some(progress.clone());
+                        app.status = format!(
+                            "训练完成! 最佳准确率 {:.2}%, 最佳损失 {:.4}",
+                            progress.best_acc, progress.best_loss
+                        );
+                        app.training_receiver = None;
+                        Task::none()
+                    } else {
+                        // 训练进行中，更新进度并继续轮询
+                        app.training_progress = Some(progress.clone());
+                        app.status = format!(
+                            "Epoch {}/{} | 训练损失 {:.4} | 验证准确率 {:.2}% | 设备 {}",
+                            progress.epoch, progress.total_epochs,
+                            progress.train_loss, progress.val_acc, progress.device_info
+                        );
+                        Task::perform(
+                            async {
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                            },
+                            |_| Message::PollTrainingProgress,
+                        )
+                    }
+                } else if app.training_busy {
+                    // 没有新进度但训练仍在进行，继续轮询
+                    Task::perform(
+                        async {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        },
+                        |_| Message::PollTrainingProgress,
+                    )
+                } else {
+                    Task::none()
+                }
+            } else {
+                Task::none()
+            }
         }
         Message::TrainingFinished(result) => {
             app.training_busy = false;
@@ -662,10 +713,6 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                     Err(e) => app.status = format!("自动获取启动失败: {e}"),
                 }
             }
-            Task::none()
-        }
-        Message::AutoFetchProgress(stats) => {
-            app.auto_fetch_stats = Some(stats);
             Task::none()
         }
         Message::InvestModeToggled(value) => {
@@ -798,7 +845,8 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
     .spacing(8);
 
     // Auto fetch panel
-    let auto_fetch_stats_text = if let Some(stats) = &app.auto_fetch_stats {
+    let auto_fetch_stats_text = if app.auto_fetch_running {
+        let stats = app.auto_fetch.stats_snapshot();
         format!(
             "总填写: {} | 错误: {} | 运行: {:.0}s",
             stats.total_fill_count, stats.incorrect_fill_count, stats.elapsed_secs

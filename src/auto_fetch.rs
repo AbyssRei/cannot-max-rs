@@ -6,7 +6,7 @@ use crate::prediction::{CandlePredictor, Predictor};
 use crate::recognition::analyze_frame;
 use crate::resources::ResourceStore;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Relative click points (x_ratio, y_ratio) matching Python auto_fetch
 const RELATIVE_POINTS: [(f32, f32); 5] = [
@@ -17,19 +17,22 @@ const RELATIVE_POINTS: [(f32, f32); 5] = [
     (0.4979, 0.6324), // watch this round
 ];
 
-/// 游戏状态模板匹配阈值
-const STATE_MATCH_THRESHOLD: f32 = 0.7;
+/// 连续空帧阈值：连续多少帧无单位才判定为战斗中
+const EMPTY_FRAMES_FOR_BATTLE: u32 = 3;
+
+/// 结算检测重试次数
+const SETTLEMENT_CHECK_RETRIES: u32 = 5;
 
 pub struct AutoFetch {
     running: Arc<AtomicBool>,
-    stats: AutoFetchStats,
+    stats: Arc<Mutex<AutoFetchStats>>,
 }
 
 impl AutoFetch {
     pub fn new() -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
-            stats: AutoFetchStats::default(),
+            stats: Arc::new(Mutex::new(AutoFetchStats::default())),
         }
     }
 
@@ -47,12 +50,14 @@ impl AutoFetch {
         }
 
         self.running.store(true, Ordering::Relaxed);
-        self.stats = AutoFetchStats::default();
+        *self.stats.lock().map_err(|e| e.to_string())? = AutoFetchStats::default();
 
         let running = self.running.clone();
+        let stats = self.stats.clone();
         std::thread::spawn(move || {
             auto_fetch_loop(
                 running,
+                stats,
                 source,
                 catalog,
                 config,
@@ -74,13 +79,21 @@ impl AutoFetch {
         self.running.load(Ordering::Relaxed)
     }
 
-    pub fn stats(&self) -> &AutoFetchStats {
-        &self.stats
+    /// 获取当前统计信息（线程安全快照）
+    pub fn stats_snapshot(&self) -> AutoFetchStats {
+        self.stats.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+}
+
+fn update_stats(stats: &Arc<Mutex<AutoFetchStats>>, f: impl FnOnce(&mut AutoFetchStats)) {
+    if let Ok(mut s) = stats.lock() {
+        f(&mut s);
     }
 }
 
 fn auto_fetch_loop(
     running: Arc<AtomicBool>,
+    stats: Arc<Mutex<AutoFetchStats>>,
     source: CaptureSource,
     catalog: CaptureCatalog,
     config: AppConfig,
@@ -96,7 +109,9 @@ fn auto_fetch_loop(
     let mut incorrect_fill_count = 0u32;
     let mut current_prediction = 0.5f32;
     let mut current_state = GameState::Unknown;
-    let mut last_frame_size: (u32, u32) = (1920, 1080);
+    let mut last_frame_size = (1920u32, 1080u32);
+    let mut consecutive_empty_frames: u32 = 0;
+    let mut settlement_check_count: u32 = 0;
 
     while running.load(Ordering::Relaxed) {
         // Check duration limit
@@ -106,6 +121,14 @@ fn auto_fetch_loop(
                 break;
             }
         }
+
+        // 更新运行时长统计
+        let elapsed = start_time.elapsed().as_secs_f64();
+        update_stats(&stats, |s| {
+            s.total_fill_count = total_fill_count;
+            s.incorrect_fill_count = incorrect_fill_count;
+            s.elapsed_secs = elapsed;
+        });
 
         // Capture screenshot
         let frame = match capture_frame(&source, &config, &catalog) {
@@ -125,12 +148,18 @@ fn auto_fetch_loop(
             continue;
         };
 
-        // 状态判断：根据识别结果推断当前状态
+        // 改进的状态判断逻辑
         if !snapshot.units.is_empty() {
-            // 有单位识别结果 → 战前界面
+            // 有单位识别结果
+            consecutive_empty_frames = 0;
+            settlement_check_count = 0;
             match current_state {
                 GameState::InBattle | GameState::Settlement => {
                     // 战斗中/结算后重新出现单位 → 新一轮战前
+                    current_state = GameState::PreBattle;
+                }
+                GameState::Unknown | GameState::MainMenu | GameState::Finished => {
+                    // 未知/主菜单/完成后出现单位 → 战前
                     current_state = GameState::PreBattle;
                 }
                 _ => {
@@ -138,19 +167,28 @@ fn auto_fetch_loop(
                 }
             }
         } else {
-            // 无单位识别结果，根据当前状态推断
+            // 无单位识别结果
+            consecutive_empty_frames += 1;
             match current_state {
                 GameState::PreBattle => {
-                    // 从战前进入战斗中（单位消失=战斗开始）
-                    current_state = GameState::InBattle;
+                    // 从战前进入战斗中（连续空帧超过阈值才判定）
+                    if consecutive_empty_frames >= EMPTY_FRAMES_FOR_BATTLE {
+                        current_state = GameState::InBattle;
+                    }
                 }
                 GameState::InBattle => {
                     // 战斗中单位持续为空，检查是否进入结算
-                    // 使用饱和度分析判断胜负
-                    if let Some(_result) = calculate_battle_result(&frame) {
-                        current_state = GameState::Settlement;
+                    settlement_check_count += 1;
+                    if settlement_check_count >= SETTLEMENT_CHECK_RETRIES {
+                        if let Some(_result) = calculate_battle_result(&frame) {
+                            current_state = GameState::Settlement;
+                            settlement_check_count = 0;
+                        }
                     }
-                    // 否则保持 InBattle
+                }
+                GameState::Unknown => {
+                    // 未知状态且无单位，尝试推进到主菜单
+                    current_state = GameState::MainMenu;
                 }
                 _ => {}
             }
@@ -220,6 +258,14 @@ fn auto_fetch_loop(
 
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+
+    // 最终更新统计
+    let elapsed = start_time.elapsed().as_secs_f64();
+    update_stats(&stats, |s| {
+        s.total_fill_count = total_fill_count;
+        s.incorrect_fill_count = incorrect_fill_count;
+        s.elapsed_secs = elapsed;
+    });
 }
 
 fn click_relative(

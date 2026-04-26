@@ -287,18 +287,18 @@ impl TrainingPipeline {
         let t0 = std::time::Instant::now();
 
         for epoch in 0..cfg.epochs {
-            let (tl, ta) = train_epoch(&model, &train, &device, &mut opt, cfg.batch_size, tfc)?;
-            let (vl, va) = eval(&model, &val, &device, cfg.batch_size, tfc)?;
+            let (train_loss, train_acc) = train_epoch(&model, &train, &device, &mut opt, cfg.batch_size, tfc)?;
+            let (val_loss, val_acc) = eval(&model, &val, &device, cfg.batch_size, tfc)?;
 
             let sd = Path::new(&cfg.save_dir);
-            if va > best_acc {
-                best_acc = va;
+            if val_acc > best_acc {
+                best_acc = val_acc;
                 let p = sd.join("best_model_acc.safetensors");
                 export_safetensors(&varmap, &p)?;
                 paths.push(p);
             }
-            if vl < best_loss {
-                best_loss = vl;
+            if val_loss < best_loss {
+                best_loss = val_loss;
                 let p = sd.join("best_model_loss.safetensors");
                 export_safetensors(&varmap, &p)?;
                 paths.push(p);
@@ -309,7 +309,7 @@ impl TrainingPipeline {
             let rem = avg * (cfg.epochs as f64 - epoch as f64 - 1.0);
             let _ = tx.send(TrainProgress {
                 epoch: epoch+1, total_epochs: cfg.epochs,
-                train_loss: tl, train_acc: ta, val_loss: vl, val_acc: va,
+                train_loss, train_acc, val_loss, val_acc,
                 best_acc, best_loss, elapsed_secs: elapsed,
                 estimated_remaining_secs: rem.max(0.0), device_info: dev_info.clone(),
             });
@@ -320,62 +320,119 @@ impl TrainingPipeline {
     }
 }
 
-fn train_epoch(model:&UnitAwareTransformer, samples:&[TrainSample], device:&Device,
-               opt:&mut AdamW, bs:usize, tfc:usize) -> Result<(f32,f32), String> {
-    let mut tl = 0.0f32; let mut cor = 0usize; let mut tot = 0usize;
-    let nb = (samples.len()+bs-1)/bs;
-    for bi in 0..nb {
-        let s = bi*bs; let e = (s+bs).min(samples.len());
-        let batch = &samples[s..e]; let bsz = batch.len();
-        let ls = b2t(batch, |x| &x.left_signs, device, (bsz,tfc))?;
-        let lc = b2t(batch, |x| &x.left_counts, device, (bsz,tfc))?;
-        let rs = b2t(batch, |x| &x.right_signs, device, (bsz,tfc))?;
-        let rc = b2t(batch, |x| &x.right_counts, device, (bsz,tfc))?;
-        let lab: Vec<f32> = batch.iter().map(|x| x.label).collect();
-        let lab = Tensor::from_vec(lab, (bsz,), device).map_err(se)?;
-        let out = model.forward(&ls,&lc,&rs,&rc)?;
-        let diff = out.sub(&lab).map_err(se)?;
+fn train_epoch(
+    model: &UnitAwareTransformer,
+    samples: &[TrainSample],
+    device: &Device,
+    optimizer: &mut AdamW,
+    batch_size: usize,
+    total_feature_count: usize,
+) -> Result<(f32, f32), String> {
+    let mut total_loss = 0.0f32;
+    let mut correct_count = 0usize;
+    let mut total_count = 0usize;
+    let num_batches = (samples.len() + batch_size - 1) / batch_size;
+
+    for batch_index in 0..num_batches {
+        let start = batch_index * batch_size;
+        let end = (start + batch_size).min(samples.len());
+        let batch = &samples[start..end];
+        let actual_batch_size = batch.len();
+
+        let left_signs = batch_to_tensor(batch, |sample| &sample.left_signs, device, (actual_batch_size, total_feature_count))?;
+        let left_counts = batch_to_tensor(batch, |sample| &sample.left_counts, device, (actual_batch_size, total_feature_count))?;
+        let right_signs = batch_to_tensor(batch, |sample| &sample.right_signs, device, (actual_batch_size, total_feature_count))?;
+        let right_counts = batch_to_tensor(batch, |sample| &sample.right_counts, device, (actual_batch_size, total_feature_count))?;
+
+        let labels: Vec<f32> = batch.iter().map(|sample| sample.label).collect();
+        let labels_tensor = Tensor::from_vec(labels, (actual_batch_size,), device).map_err(se)?;
+
+        let output = model.forward(&left_signs, &left_counts, &right_signs, &right_counts)?;
+        let diff = output.sub(&labels_tensor).map_err(se)?;
         let loss = diff.sqr().map_err(se)?.mean_all().map_err(se)?;
-        opt.backward_step(&loss).map_err(|e| e.to_string())?;
-        tl += loss.to_scalar::<f32>().map_err(se)?;
-        let pred = out.ge(0.5f64).map_err(se)?.to_dtype(DType::F32).map_err(se)?;
-        let lp = lab.ge(0.5f64).map_err(se)?.to_dtype(DType::F32).map_err(se)?;
-        let eq: u32 = pred.eq(&lp).map_err(se)?.to_dtype(DType::U32).map_err(se)?.sum_all().map_err(se)?.to_scalar::<u32>().map_err(se)?;
-        cor += eq as usize; tot += bsz;
+
+        optimizer.backward_step(&loss).map_err(|e| e.to_string())?;
+
+        total_loss += loss.to_scalar::<f32>().map_err(se)?;
+
+        let predictions = output.ge(0.5f64).map_err(se)?.to_dtype(DType::F32).map_err(se)?;
+        let label_binary = labels_tensor.ge(0.5f64).map_err(se)?.to_dtype(DType::F32).map_err(se)?;
+        let matches: u32 = predictions.eq(&label_binary).map_err(se)?
+            .to_dtype(DType::U32).map_err(se)?
+            .sum_all().map_err(se)?
+            .to_scalar::<u32>().map_err(se)?;
+
+        correct_count += matches as usize;
+        total_count += actual_batch_size;
     }
-    Ok((tl/nb.max(1) as f32, 100.0*cor as f32/tot.max(1) as f32))
+
+    let avg_loss = total_loss / num_batches.max(1) as f32;
+    let accuracy = 100.0 * correct_count as f32 / total_count.max(1) as f32;
+    Ok((avg_loss, accuracy))
 }
 
-fn eval(model:&UnitAwareTransformer, samples:&[TrainSample], device:&Device,
-        bs:usize, tfc:usize) -> Result<(f32,f32), String> {
-    let mut tl = 0.0f32; let mut cor = 0usize; let mut tot = 0usize;
-    let nb = (samples.len()+bs-1)/bs;
-    for bi in 0..nb {
-        let s = bi*bs; let e = (s+bs).min(samples.len());
-        let batch = &samples[s..e]; let bsz = batch.len();
-        let ls = b2t(batch, |x| &x.left_signs, device, (bsz,tfc))?;
-        let lc = b2t(batch, |x| &x.left_counts, device, (bsz,tfc))?;
-        let rs = b2t(batch, |x| &x.right_signs, device, (bsz,tfc))?;
-        let rc = b2t(batch, |x| &x.right_counts, device, (bsz,tfc))?;
-        let lab: Vec<f32> = batch.iter().map(|x| x.label).collect();
-        let lab = Tensor::from_vec(lab, (bsz,), device).map_err(se)?;
-        let out = model.forward(&ls,&lc,&rs,&rc)?;
-        let diff = out.sub(&lab).map_err(se)?;
+fn eval(
+    model: &UnitAwareTransformer,
+    samples: &[TrainSample],
+    device: &Device,
+    batch_size: usize,
+    total_feature_count: usize,
+) -> Result<(f32, f32), String> {
+    let mut total_loss = 0.0f32;
+    let mut correct_count = 0usize;
+    let mut total_count = 0usize;
+    let num_batches = (samples.len() + batch_size - 1) / batch_size;
+
+    for batch_index in 0..num_batches {
+        let start = batch_index * batch_size;
+        let end = (start + batch_size).min(samples.len());
+        let batch = &samples[start..end];
+        let actual_batch_size = batch.len();
+
+        let left_signs = batch_to_tensor(batch, |sample| &sample.left_signs, device, (actual_batch_size, total_feature_count))?;
+        let left_counts = batch_to_tensor(batch, |sample| &sample.left_counts, device, (actual_batch_size, total_feature_count))?;
+        let right_signs = batch_to_tensor(batch, |sample| &sample.right_signs, device, (actual_batch_size, total_feature_count))?;
+        let right_counts = batch_to_tensor(batch, |sample| &sample.right_counts, device, (actual_batch_size, total_feature_count))?;
+
+        let labels: Vec<f32> = batch.iter().map(|sample| sample.label).collect();
+        let labels_tensor = Tensor::from_vec(labels, (actual_batch_size,), device).map_err(se)?;
+
+        let output = model.forward(&left_signs, &left_counts, &right_signs, &right_counts)?;
+        let diff = output.sub(&labels_tensor).map_err(se)?;
         let loss = diff.sqr().map_err(se)?.mean_all().map_err(se)?;
-        tl += loss.to_scalar::<f32>().map_err(se)?;
-        let pred = out.ge(0.5f64).map_err(se)?.to_dtype(DType::F32).map_err(se)?;
-        let lp = lab.ge(0.5f64).map_err(se)?.to_dtype(DType::F32).map_err(se)?;
-        let eq: u32 = pred.eq(&lp).map_err(se)?.to_dtype(DType::U32).map_err(se)?.sum_all().map_err(se)?.to_scalar::<u32>().map_err(se)?;
-        cor += eq as usize; tot += bsz;
+
+        total_loss += loss.to_scalar::<f32>().map_err(se)?;
+
+        let predictions = output.ge(0.5f64).map_err(se)?.to_dtype(DType::F32).map_err(se)?;
+        let label_binary = labels_tensor.ge(0.5f64).map_err(se)?.to_dtype(DType::F32).map_err(se)?;
+        let matches: u32 = predictions.eq(&label_binary).map_err(se)?
+            .to_dtype(DType::U32).map_err(se)?
+            .sum_all().map_err(se)?
+            .to_scalar::<u32>().map_err(se)?;
+
+        correct_count += matches as usize;
+        total_count += actual_batch_size;
     }
-    Ok((tl/nb.max(1) as f32, 100.0*cor as f32/tot.max(1) as f32))
+
+    let avg_loss = total_loss / num_batches.max(1) as f32;
+    let accuracy = 100.0 * correct_count as f32 / total_count.max(1) as f32;
+    Ok((avg_loss, accuracy))
 }
 
-fn b2t<F>(batch:&[TrainSample], ext:F, device:&Device, shape:(usize,usize)) -> Result<Tensor,String>
-where F: Fn(&TrainSample)->&Vec<f32> {
-    let mut d = Vec::with_capacity(shape.0*shape.1);
-    for s in batch { d.extend_from_slice(ext(s)); }
-    Tensor::from_vec(d, shape, device).map_err(se)
+fn batch_to_tensor<F>(
+    batch: &[TrainSample],
+    extract: F,
+    device: &Device,
+    shape: (usize, usize),
+) -> Result<Tensor, String>
+where
+    F: Fn(&TrainSample) -> &Vec<f32>,
+{
+    let mut data = Vec::with_capacity(shape.0 * shape.1);
+    for sample in batch {
+        data.extend_from_slice(extract(sample));
+    }
+    Tensor::from_vec(data, shape, device).map_err(se)
 }
 
 pub fn export_safetensors(varmap: &VarMap, path: &Path) -> Result<(), String> {
@@ -395,8 +452,54 @@ fn rename_model_files(sd: &Path, dl: usize, ba: f32, bl: f32) -> Result<(), Stri
     Ok(())
 }
 
+/// 生成时间戳字符串（考虑闰年的近似计算）
 fn chrono_ts() -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let d = now/86400; let tod = now%86400;
-    format!("{:04}_{:02}_{:02}_{:02}_{:02}_{:02}", 1970+d/365, d%365/30+1, d%365%30+1, tod/3600, tod%3600/60, tod%60)
+    let total_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut remaining_days = total_secs / 86400;
+    let time_of_day = total_secs % 86400;
+
+    // 从1970年开始逐年减去天数，考虑闰年
+    let mut year = 1970u32;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if remaining_days < days_in_year {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    // 逐月减去天数
+    let month_days = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1u32;
+    for &days in &month_days {
+        if remaining_days < days {
+            break;
+        }
+        remaining_days -= days;
+        month += 1;
+    }
+
+    let day = remaining_days + 1;
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+
+    format!(
+        "{:04}_{:02}_{:02}_{:02}_{:02}_{:02}",
+        year, month, day, hour, minute, second
+    )
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
