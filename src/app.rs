@@ -1,16 +1,21 @@
-use crate::automation::{AutomationAction, execute_action};
+use crate::automation::{is_automation_allowed, execute_action, AutomationAction};
 use crate::auto_fetch::AutoFetch;
-use crate::capture::discover_sources;
+use crate::capture::{discover_sources, is_16by9};
 use crate::config::{AppConfig, Win32InputMethodConfig};
 use crate::core::{
-    AnalysisOutput, CaptureCatalog, GameMode, PredictionResult, SourceChoice,
-    TrainConfig, TrainProgress, TrainResult,
+    AnalysisOutput, CaptureCatalog, CaptureSource, GameMode, ModelSelection, PredictionResult,
+    RosterPanelState, RosterSource, Side, SourceChoice, TrainConfig, TrainProgress, TrainResult,
+    UiMode,
 };
+use crate::model_scanner::ModelScanner;
 use crate::ocr::{DeepseekCliModel, OcrBackend, library_hint, ocr_hint};
+use crate::path_utils::normalize_path;
 use crate::pipeline::AnalysisPipeline;
 use crate::recognition::default_battle_roi;
 use crate::resources::ResourceStore;
+use crate::roster::RosterManager;
 use crate::training::TrainingPipeline;
+use crate::visualization::VisualizationRenderer;
 use iced::widget::{
     button, checkbox, column, container, image, pick_list, row, scrollable, text, text_input,
 };
@@ -72,6 +77,35 @@ pub enum Message {
     // History
     ToggleHistoryPanel,
     SpecialMonsterMessage(String),
+    // ── 新增：界面模式 ──
+    UiModeChanged(UiMode),
+    // ── 新增：手动阵容 ──
+    ToggleRosterPanel,
+    RosterSlotClicked(Side, usize),
+    MonsterSelected(u32, String),
+    MonsterCountInput(String),
+    RosterSlotCleared(Side, usize),
+    PredictFromRoster,
+    MonsterPickerClosed,
+    // ── 新增：模型扫描与选择 ──
+    ModelSelectionChanged(ModelSelection),
+    OpenModelFileDialog,
+    ModelFilePicked(Option<std::path::PathBuf>),
+    OpenResourceDirDialog,
+    ResourceDirPicked(Option<std::path::PathBuf>),
+    // ── 新增：可视化 ──
+    ToggleVisualization,
+    // ── 新增：ROI 图形化选择 ──
+    RoiDragStart((f32, f32)),
+    RoiDragging((f32, f32)),
+    RoiDragEnd,
+}
+
+/// ROI 拖拽状态
+#[derive(Debug, Clone)]
+struct RoiDragState {
+    start: (f32, f32),
+    current: (f32, f32),
 }
 
 pub struct CannotMaxApp {
@@ -118,6 +152,15 @@ pub struct CannotMaxApp {
     history_visible: bool,
     history_results: Vec<String>,
     special_messages: String,
+    // ── 新增字段 ──
+    ui_mode: UiMode,
+    roster_manager: RosterManager,
+    monster_count_input: String,
+    available_models: Vec<crate::core::ModelEntry>,
+    current_model_selection: ModelSelection,
+    visualization_enabled: bool,
+    visualization_overlay: Option<crate::core::VisualizationOverlay>,
+    roi_dragging: Option<RoiDragState>,
 }
 
 impl CannotMaxApp {
@@ -126,6 +169,33 @@ impl CannotMaxApp {
         let default_roi = config.roi.unwrap_or_default();
         let resources_summary = summarize_runtime(&config);
         let tc = &config.train_config;
+
+        // 扫描可用模型
+        let models_dir = ModelScanner::default_models_dir();
+        let available_models = ModelScanner::scan(&models_dir);
+
+        // 初始化模型选择
+        let current_model_selection = if config.model_path.exists() {
+            // 尝试匹配扫描到的模型
+            available_models
+                .iter()
+                .find(|entry| entry.path == config.model_path)
+                .map(|entry| ModelSelection::Scanned(entry.clone()))
+                .unwrap_or_else(|| ModelSelection::Custom(config.model_path.clone()))
+        } else if let Some(first) = available_models.first() {
+            ModelSelection::Scanned(first.clone())
+        } else {
+            ModelSelection::OtherOption
+        };
+
+        // 初始化阵容面板
+        let roster_panel = RosterPanelState {
+            roster: config.last_roster.clone().unwrap_or_default(),
+            source: RosterSource::AutoRecognized,
+            expanded: config.roster_expanded,
+            monster_picker_open: false,
+            picker_target: None,
+        };
 
         Self {
             resource_root_text: config.resource_root.display().to_string(),
@@ -154,7 +224,7 @@ impl CannotMaxApp {
             training_busy: false,
             training_receiver: None,
             model_loaded: config.model_path.exists(),
-            config,
+            config: config.clone(),
             catalog: CaptureCatalog::default(),
             resources_summary,
             selected_source: None,
@@ -168,6 +238,18 @@ impl CannotMaxApp {
             history_visible: false,
             history_results: Vec::new(),
             special_messages: String::new(),
+            // 新增字段
+            ui_mode: config.ui_mode,
+            roster_manager: RosterManager {
+                panel: roster_panel,
+                available_monsters: Vec::new(),
+            },
+            monster_count_input: String::new(),
+            available_models,
+            current_model_selection,
+            visualization_enabled: config.visualization_enabled,
+            visualization_overlay: None,
+            roi_dragging: None,
         }
     }
 
@@ -210,6 +292,10 @@ impl CannotMaxApp {
         self.config.deepseek_device = self.deepseek_device_text.clone();
         self.config.roi = self.current_roi().filter(|roi| !roi.is_empty());
         self.config.train_config = self.current_train_config();
+        self.config.ui_mode = self.ui_mode;
+        self.config.visualization_enabled = self.visualization_enabled;
+        self.config.roster_expanded = self.roster_manager.panel.expanded;
+        self.config.last_roster = Some(self.roster_manager.panel.roster.clone());
         self.status = match self.config.save() {
             Ok(()) => "配置已保存".to_string(),
             Err(error) => format!("配置保存失败: {error}"),
@@ -284,6 +370,18 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
+            // 检查16:9比例
+            if let Some(CaptureSource::Monitor(idx)) = app.config.last_capture_source.as_ref() {
+                if let Some(monitor) = app.catalog.monitors.iter().find(|m| m.index == *idx) {
+                    if !is_16by9(monitor.width, monitor.height) {
+                        app.status = format!(
+                            "提示: 显示器分辨率 {}x{} 非 16:9 比例",
+                            monitor.width, monitor.height
+                        );
+                    }
+                }
+            }
+
             app.busy = true;
             app.status = "正在截屏、识别并预测…".to_string();
             app.config.resource_root = app.resource_root_text.clone().into();
@@ -328,6 +426,12 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
+            // 自动化操作模式限制检查
+            if let Err(e) = is_automation_allowed(app.config.game_mode, &source.source) {
+                app.status = e;
+                return Task::none();
+            }
+
             let Ok(x) = app.action_x_text.trim().parse::<i32>() else {
                 app.status = "点击坐标 x 无效，请输入整数".to_string();
                 return Task::none();
@@ -360,6 +464,11 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 return Task::none();
             };
 
+            if let Err(e) = is_automation_allowed(app.config.game_mode, &source.source) {
+                app.status = e;
+                return Task::none();
+            }
+
             if app.action_text.trim().is_empty() {
                 app.status = "请输入要发送的文本".to_string();
                 return Task::none();
@@ -388,6 +497,11 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 app.status = "请先选择一个输入源".to_string();
                 return Task::none();
             };
+
+            if let Err(e) = is_automation_allowed(app.config.game_mode, &source.source) {
+                app.status = e;
+                return Task::none();
+            }
 
             app.busy = true;
             app.status = "正在发送 inactive 请求…".to_string();
@@ -420,12 +534,29 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
 
             match result {
                 Ok(output) => {
-                    let image = output.frame.image.clone();
-                    app.preview = Some(image::Handle::from_rgba(
-                        image.width(),
-                        image.height(),
-                        image.into_raw(),
-                    ));
+                    let frame_image = output.frame.image.clone();
+
+                    // 可视化渲染
+                    if app.visualization_enabled {
+                        let overlay = VisualizationRenderer::build_overlay(
+                            &output.snapshot,
+                            output.snapshot.roi,
+                            output.snapshot.frame_size,
+                        );
+                        let annotated = VisualizationRenderer::render_overlay(&frame_image, &overlay);
+                        app.visualization_overlay = Some(overlay);
+                        app.preview = Some(image::Handle::from_rgba(
+                            annotated.width(),
+                            annotated.height(),
+                            annotated.into_raw(),
+                        ));
+                    } else {
+                        app.preview = Some(image::Handle::from_rgba(
+                            frame_image.width(),
+                            frame_image.height(),
+                            frame_image.into_raw(),
+                        ));
+                    }
 
                     app.recognized_rows = if output.snapshot.units.is_empty() {
                         vec!["未识别到有效单位，当前为一期模板匹配基线。".to_string()]
@@ -449,11 +580,13 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                             .collect()
                     };
                     app.prediction = Some(output.prediction.clone());
-                    
-                    // 使用 pipeline 返回的特殊怪物和历史匹配结果
+
+                    // 自动同步阵容
+                    app.roster_manager.sync_from_recognition(&output.snapshot.units);
+
                     app.special_messages = output.special_messages;
                     app.history_results = output.history_results;
-                    
+
                     app.status = format!(
                         "{} | ROI {:?}",
                         output.frame.note,
@@ -551,7 +684,6 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 result
             });
 
-            // 首次轮询训练进度
             Task::perform(
                 async {
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -566,9 +698,7 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                 progress.epoch, progress.total_epochs,
                 progress.train_loss, progress.val_acc, progress.device_info
             );
-            // 如果训练尚未完成，继续轮询进度
             if progress.epoch < progress.total_epochs {
-                // 继续等待下一批进度
                 Task::perform(
                     async {
                         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -576,7 +706,6 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                     |_| Message::PollTrainingProgress,
                 )
             } else {
-                // 训练完成
                 app.training_busy = false;
                 Task::none()
             }
@@ -590,7 +719,6 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
 
                 if let Some(progress) = last_progress {
                     if progress.epoch >= progress.total_epochs {
-                        // 训练完成
                         app.training_busy = false;
                         app.training_progress = Some(progress.clone());
                         app.status = format!(
@@ -600,7 +728,6 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                         app.training_receiver = None;
                         Task::none()
                     } else {
-                        // 训练进行中，更新进度并继续轮询
                         app.training_progress = Some(progress.clone());
                         app.status = format!(
                             "Epoch {}/{} | 训练损失 {:.4} | 验证准确率 {:.2}% | 设备 {}",
@@ -615,7 +742,6 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                         )
                     }
                 } else if app.training_busy {
-                    // 没有新进度但训练仍在进行，继续轮询
                     Task::perform(
                         async {
                             std::thread::sleep(std::time::Duration::from_millis(200));
@@ -691,12 +817,19 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                     app.status = "请先选择一个输入源".to_string();
                     return Task::none();
                 };
+
+                // 自动化操作模式限制检查
+                if let Err(e) = is_automation_allowed(app.config.game_mode, &source.source) {
+                    app.status = e;
+                    return Task::none();
+                }
+
                 let config = app.config.clone();
                 let catalog = app.catalog.clone();
-                let game_mode = if app.config.game_mode == GameMode::Pc {
-                    "PC".to_string()
-                } else {
-                    "模拟器".to_string()
+                let game_mode = match app.config.game_mode {
+                    GameMode::Pc => "PC".to_string(),
+                    GameMode::WindowOnly => "WindowOnly".to_string(),
+                    GameMode::Emulator => "模拟器".to_string(),
                 };
                 match app.auto_fetch.start(
                     source.source,
@@ -729,18 +862,231 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             app.special_messages = msg;
             Task::none()
         }
+        // ── 新增：界面模式 ──
+        Message::UiModeChanged(mode) => {
+            app.ui_mode = mode;
+            app.config.ui_mode = mode;
+            let _ = app.config.save();
+            Task::none()
+        }
+        // ── 新增：手动阵容 ──
+        Message::ToggleRosterPanel => {
+            app.roster_manager.toggle_expanded();
+            Task::none()
+        }
+        Message::RosterSlotClicked(side, index) => {
+            app.roster_manager.open_monster_picker(side, index);
+            Task::none()
+        }
+        Message::MonsterSelected(id, name) => {
+            if let Some((side, index)) = app.roster_manager.panel.picker_target {
+                let count: u32 = app.monster_count_input.parse().unwrap_or(1);
+                app.roster_manager.set_slot(side, index, id, name, count);
+            }
+            app.roster_manager.close_monster_picker();
+            app.monster_count_input.clear();
+            Task::none()
+        }
+        Message::MonsterCountInput(value) => {
+            app.monster_count_input = value;
+            Task::none()
+        }
+        Message::RosterSlotCleared(side, index) => {
+            app.roster_manager.clear_slot(side, index);
+            Task::none()
+        }
+        Message::PredictFromRoster => {
+            let Some(source) = app.selected_source.clone() else {
+                app.status = "请先选择一个输入源".to_string();
+                return Task::none();
+            };
+
+            app.busy = true;
+            app.status = "正在从手动阵容预测…".to_string();
+
+            let snapshot = app.roster_manager.to_battle_snapshot(
+                &source.source,
+                (1280, 720),
+                app.current_roi().filter(|roi| !roi.is_empty()),
+            );
+            let config = app.config.clone();
+
+            Task::perform(
+                async move {
+                    let pipeline = AnalysisPipeline::new(config.model_path.clone());
+                    pipeline.predict_from_snapshot(&snapshot, &config)
+                },
+                Message::AnalysisFinished,
+            )
+        }
+        Message::MonsterPickerClosed => {
+            app.roster_manager.close_monster_picker();
+            Task::none()
+        }
+        // ── 新增：模型扫描与选择 ──
+        Message::ModelSelectionChanged(selection) => {
+            match &selection {
+                ModelSelection::Scanned(entry) => {
+                    app.config.model_path = entry.path.clone();
+                    app.model_path_text = entry.path.display().to_string();
+                    app.model_loaded = entry.path.exists();
+                    let _ = app.config.save();
+                }
+                ModelSelection::Custom(path) => {
+                    app.config.model_path = path.clone();
+                    app.model_path_text = path.display().to_string();
+                    app.model_loaded = path.exists();
+                    let _ = app.config.save();
+                }
+                ModelSelection::OtherOption => {
+                    // 触发文件对话框
+                    return Task::perform(
+                        async {
+                            let file = rfd::AsyncFileDialog::new()
+                                .add_filter("safetensors", &["safetensors"])
+                                .pick_file()
+                                .await;
+                            file.map(|f| f.path().to_path_buf())
+                        },
+                        Message::ModelFilePicked,
+                    );
+                }
+            }
+            app.current_model_selection = selection;
+            Task::none()
+        }
+        Message::OpenModelFileDialog => {
+            Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .add_filter("safetensors", &["safetensors"])
+                        .pick_file()
+                        .await;
+                    file.map(|f| f.path().to_path_buf())
+                },
+                Message::ModelFilePicked,
+            )
+        }
+        Message::ModelFilePicked(path) => {
+            if let Some(path) = path {
+                let workspace_root = AppConfig::workspace_root();
+                let normalized = normalize_path(&path, &workspace_root);
+                app.config.model_path = normalized.stored.clone();
+                app.model_path_text = normalized.display.display().to_string();
+                app.model_loaded = path.exists();
+                app.current_model_selection = ModelSelection::Custom(normalized.stored);
+                let _ = app.config.save();
+                app.status = format!("模型已加载: {}", normalized.display.display());
+            }
+            Task::none()
+        }
+        Message::OpenResourceDirDialog => {
+            Task::perform(
+                async {
+                    let folder = rfd::AsyncFileDialog::new().pick_folder().await;
+                    folder.map(|f| f.path().to_path_buf())
+                },
+                Message::ResourceDirPicked,
+            )
+        }
+        Message::ResourceDirPicked(path) => {
+            if let Some(path) = path {
+                let workspace_root = AppConfig::workspace_root();
+                let normalized = normalize_path(&path, &workspace_root);
+                app.config.resource_root = normalized.stored.clone();
+                app.resource_root_text = normalized.display.display().to_string();
+                let _ = app.config.save();
+                app.resources_summary = summarize_runtime(&app.config);
+                app.status = format!("资源目录已设置: {}", normalized.display.display());
+            }
+            Task::none()
+        }
+        // ── 新增：可视化 ──
+        Message::ToggleVisualization => {
+            app.visualization_enabled = !app.visualization_enabled;
+            app.config.visualization_enabled = app.visualization_enabled;
+            let _ = app.config.save();
+            Task::none()
+        }
+        // ── 新增：ROI 图形化选择 ──
+        Message::RoiDragStart(pos) => {
+            app.roi_dragging = Some(RoiDragState {
+                start: pos,
+                current: pos,
+            });
+            Task::none()
+        }
+        Message::RoiDragging(pos) => {
+            if let Some(state) = &mut app.roi_dragging {
+                state.current = pos;
+            }
+            Task::none()
+        }
+        Message::RoiDragEnd => {
+            if let Some(state) = app.roi_dragging.take() {
+                // 将相对坐标转换为ROI
+                let x = (state.start.0.min(state.current.0) * 1280.0) as u32;
+                let y = (state.start.1.min(state.current.1) * 720.0) as u32;
+                let w = ((state.current.0 - state.start.0).abs() * 1280.0) as u32;
+                let h = ((state.current.1 - state.start.1).abs() * 720.0) as u32;
+                app.roi_x = x.to_string();
+                app.roi_y = y.to_string();
+                app.roi_width = w.to_string();
+                app.roi_height = h.to_string();
+            }
+            Task::none()
+        }
     }
 }
 
-pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
-    let source_choices = app.catalog.source_choices(app.config.game_mode);
+// ── 视图渲染 ──
 
-    let header = column![
+pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
+    let header = view_header(app);
+
+    let content = match app.ui_mode {
+        UiMode::Normal => view_normal_mode(app),
+        UiMode::Developer => view_developer_mode(app),
+    };
+
+    container(scrollable(
+        column![header, content].spacing(20).padding(20),
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+fn view_header(app: &CannotMaxApp) -> Element<'_, Message> {
+    let mode_toggle = row![
+        button(if app.ui_mode == UiMode::Normal {
+            "普通模式"
+        } else {
+            "切换到普通模式"
+        })
+        .on_press(Message::UiModeChanged(UiMode::Normal)),
+        button(if app.ui_mode == UiMode::Developer {
+            "开发者模式"
+        } else {
+            "切换到开发者模式"
+        })
+        .on_press(Message::UiModeChanged(UiMode::Developer)),
+    ]
+    .spacing(8);
+
+    column![
         text("cannot-max-rs").size(32),
         text("二期增强: 训练 + 自动获取 + 历史匹配 + 场地识别 + PC端兼容").size(16),
         text(&app.status).size(14),
+        mode_toggle,
     ]
-    .spacing(8);
+    .spacing(8)
+    .into()
+}
+
+/// 普通模式视图
+fn view_normal_mode(app: &CannotMaxApp) -> Element<'_, Message> {
+    let source_choices = app.catalog.source_choices(app.config.game_mode);
 
     let controls = column![
         row![
@@ -762,17 +1108,340 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
             Message::SourceSelected
         )
         .placeholder("选择 ADB / 窗口 / 显示器"),
-        row![
-            button("模拟器模式").on_press(Message::ModeChanged(GameMode::Emulator)),
-            button("PC 模式").on_press(Message::ModeChanged(GameMode::Pc)),
-            text(format!("当前模式: {}", app.config.game_mode)),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center),
+        view_game_mode_selector(app),
     ]
     .spacing(12);
 
-    let automation_panel = column![
+    // 模型下拉选择
+    let model_options: Vec<ModelSelection> = app
+        .available_models
+        .iter()
+        .map(|entry| ModelSelection::Scanned(entry.clone()))
+        .collect();
+
+    let model_panel = column![
+        text("模型选择").size(16),
+        pick_list(
+            model_options,
+            Some(app.current_model_selection.clone()),
+            Message::ModelSelectionChanged
+        )
+        .placeholder("选择模型文件"),
+    ]
+    .spacing(8);
+
+    // 手动阵容面板
+    let roster_panel = view_roster_panel(app);
+
+    // 自动获取面板
+    let auto_fetch_panel = view_auto_fetch_panel(app);
+
+    // 预览与结果
+    let preview_panel = view_preview(app);
+    let result_panel = view_result_panel(app);
+    let special_panel = view_special_panel(app);
+
+    row![
+        container(column![
+            controls,
+            model_panel,
+            roster_panel,
+            auto_fetch_panel,
+        ].spacing(16))
+            .width(Length::FillPortion(1)),
+        container(column![
+            preview_panel,
+            result_panel,
+            special_panel,
+        ].spacing(16))
+            .width(Length::FillPortion(2)),
+    ]
+    .spacing(20)
+    .into()
+}
+
+/// 开发者模式视图
+fn view_developer_mode(app: &CannotMaxApp) -> Element<'_, Message> {
+    let source_choices = app.catalog.source_choices(app.config.game_mode);
+
+    let controls = column![
+        row![
+            button("刷新输入源").on_press(Message::RefreshSources),
+            button(if app.busy {
+                "处理中…"
+            } else if !app.model_loaded {
+                "识别并预测（无模型，基线模式）"
+            } else {
+                "识别并预测"
+            })
+            .on_press_maybe((!app.busy).then_some(Message::CaptureAndPredict)),
+            button("保存配置").on_press(Message::SaveConfig),
+        ]
+        .spacing(12),
+        pick_list(
+            source_choices,
+            app.selected_source.clone(),
+            Message::SourceSelected
+        )
+        .placeholder("选择 ADB / 窗口 / 显示器"),
+        view_game_mode_selector(app),
+    ]
+    .spacing(12);
+
+    // 开发者模型下拉选择（含"选择其他模型"）
+    let mut model_options: Vec<ModelSelection> = app
+        .available_models
+        .iter()
+        .map(|entry| ModelSelection::Scanned(entry.clone()))
+        .collect();
+    model_options.push(ModelSelection::OtherOption);
+
+    let model_panel = column![
+        text("模型选择").size(16),
+        pick_list(
+            model_options,
+            Some(app.current_model_selection.clone()),
+            Message::ModelSelectionChanged
+        )
+        .placeholder("选择模型文件"),
+    ]
+    .spacing(8);
+
+    let roster_panel = view_roster_panel(app);
+    let auto_fetch_panel = view_auto_fetch_panel(app);
+    let path_panel = view_path_panel(app);
+    let roi_panel = view_roi_panel(app);
+    let automation_panel = view_automation_panel(app);
+    let training_panel = view_training_panel(app);
+    let visualization_toggle = view_visualization_toggle(app);
+    let history_panel = view_history_panel(app);
+
+    let preview_panel = view_preview(app);
+    let result_panel = view_result_panel(app);
+    let special_panel = view_special_panel(app);
+
+    row![
+        container(column![
+            controls,
+            model_panel,
+            roster_panel,
+            auto_fetch_panel,
+            path_panel,
+            roi_panel,
+            automation_panel,
+            training_panel,
+            visualization_toggle,
+            history_panel,
+        ].spacing(16))
+            .width(Length::FillPortion(1)),
+        container(column![
+            preview_panel,
+            result_panel,
+            special_panel,
+        ].spacing(16))
+            .width(Length::FillPortion(2)),
+    ]
+    .spacing(20)
+    .into()
+}
+
+fn view_game_mode_selector(app: &CannotMaxApp) -> Element<'_, Message> {
+    row![
+        button("模拟器模式")
+            .on_press(Message::ModeChanged(GameMode::Emulator)),
+        button("PC 模式")
+            .on_press(Message::ModeChanged(GameMode::Pc)),
+        button("普通窗口模式")
+            .on_press(Message::ModeChanged(GameMode::WindowOnly)),
+        text(format!("当前: {}", app.config.game_mode)),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn view_roster_panel(app: &CannotMaxApp) -> Element<'_, Message> {
+    let toggle_text = if app.roster_manager.panel.expanded {
+        "收起手动阵容"
+    } else {
+        "展开手动阵容"
+    };
+
+    let toggle = row![
+        button(toggle_text).on_press(Message::ToggleRosterPanel),
+        text(format!(
+            "来源: {}",
+            match app.roster_manager.panel.source {
+                RosterSource::AutoRecognized => "自动识别",
+                RosterSource::ManualInput => "手动输入",
+            }
+        ))
+        .size(13),
+    ]
+    .spacing(8);
+
+    if !app.roster_manager.panel.expanded {
+        return column![text("手动输入阵容").size(16), toggle].spacing(8).into();
+    }
+
+    // 左方3个槽位
+    let left_slots: Vec<Element<'_, Message>> = (0..3)
+        .map(|i| {
+            let slot = &app.roster_manager.panel.roster.left[i];
+            let label = slot
+                .monster_name
+                .as_ref()
+                .map(|name| format!("{} x{}", name, slot.count))
+                .unwrap_or_else(|| "空".to_string());
+            row![
+                button(text(label.clone())).on_press(Message::RosterSlotClicked(Side::Left, i)),
+                button("清空").on_press(Message::RosterSlotCleared(Side::Left, i)),
+            ]
+            .spacing(4)
+            .into()
+        })
+        .collect();
+
+    // 右方3个槽位
+    let right_slots: Vec<Element<'_, Message>> = (0..3)
+        .map(|i| {
+            let slot = &app.roster_manager.panel.roster.right[i];
+            let label = slot
+                .monster_name
+                .as_ref()
+                .map(|name| format!("{} x{}", name, slot.count))
+                .unwrap_or_else(|| "空".to_string());
+            row![
+                button(text(label.clone())).on_press(Message::RosterSlotClicked(Side::Right, i)),
+                button("清空").on_press(Message::RosterSlotCleared(Side::Right, i)),
+            ]
+            .spacing(4)
+            .into()
+        })
+        .collect();
+
+    column![
+        text("手动输入阵容").size(16),
+        toggle,
+        row![
+            column![text("左方").size(14), column(left_slots).spacing(4)],
+            column![text("右方").size(14), column(right_slots).spacing(4)],
+        ]
+        .spacing(20),
+        row![
+            text_input("数量", &app.monster_count_input)
+                .on_input(Message::MonsterCountInput)
+                .width(Length::FillPortion(1)),
+            button("从阵容预测")
+                .on_press_maybe((!app.busy).then_some(Message::PredictFromRoster)),
+        ]
+        .spacing(8),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn view_auto_fetch_panel(app: &CannotMaxApp) -> Element<'_, Message> {
+    let auto_fetch_stats_text = if app.auto_fetch_running {
+        let stats = app.auto_fetch.stats_snapshot();
+        format!(
+            "总填写: {} | 错误: {} | 运行: {:.0}s",
+            stats.total_fill_count, stats.incorrect_fill_count, stats.elapsed_secs
+        )
+    } else {
+        "暂无统计".to_string()
+    };
+
+    column![
+        text("自动获取").size(20),
+        row![
+            button(if app.auto_fetch_running {
+                "停止自动获取"
+            } else {
+                "启动自动获取"
+            })
+            .on_press(Message::ToggleAutoFetch),
+            checkbox(app.config.invest_mode).on_toggle(Message::InvestModeToggled),
+            text("投资模式").size(13),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+        text(auto_fetch_stats_text).size(13),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn view_path_panel(app: &CannotMaxApp) -> Element<'_, Message> {
+    column![
+        text("路径与资源").size(20),
+        row![
+            text_input("资源根目录", &app.resource_root_text)
+                .on_input(Message::ResourceRootChanged)
+                .width(Length::FillPortion(3)),
+            button("浏览…").on_press(Message::OpenResourceDirDialog),
+        ]
+        .spacing(8),
+        text_input("模型路径", &app.model_path_text).on_input(Message::ModelPathChanged),
+        text_input("MAA 动态库路径", &app.maa_library_path_text)
+            .on_input(Message::MaaLibraryPathChanged),
+        text_input("OCR 模型目录", &app.ocr_model_path_text)
+            .on_input(Message::OcrModelPathChanged),
+        text_input("deepseek-ocr-cli 路径", &app.deepseek_cli_path_text)
+            .on_input(Message::DeepseekCliPathChanged),
+        pick_list(
+            DeepseekCliModel::ALL.to_vec(),
+            Some(app.config.deepseek_model),
+            Message::DeepseekModelSelected
+        )
+        .placeholder("选择 deepseek-ocr 模型"),
+        text_input("PaddleOCR-VL 设备", &app.deepseek_device_text)
+            .on_input(Message::DeepseekDeviceChanged),
+        pick_list(
+            vec![OcrBackend::Maa, OcrBackend::DeepseekCli],
+            Some(app.config.ocr_backend),
+            Message::OcrBackendSelected
+        )
+        .placeholder("选择 OCR 后端"),
+        text(&app.resources_summary).size(14),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn view_roi_panel(app: &CannotMaxApp) -> Element<'_, Message> {
+    column![
+        text("ROI").size(20),
+        row![
+            text_input("x", &app.roi_x)
+                .on_input(Message::RoiXChanged)
+                .width(Length::FillPortion(1)),
+            text_input("y", &app.roi_y)
+                .on_input(Message::RoiYChanged)
+                .width(Length::FillPortion(1)),
+            text_input("w", &app.roi_width)
+                .on_input(Message::RoiWidthChanged)
+                .width(Length::FillPortion(1)),
+            text_input("h", &app.roi_height)
+                .on_input(Message::RoiHeightChanged)
+                .width(Length::FillPortion(1)),
+        ]
+        .spacing(8),
+        text("提示：在普通窗口模式下可在预览画面上拖拽框选ROI").size(13),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn view_automation_panel(app: &CannotMaxApp) -> Element<'_, Message> {
+    let is_window_only = app.config.game_mode == GameMode::WindowOnly;
+    let mode_warning = if is_window_only {
+        text("当前为普通窗口模式，不支持自动化操作").size(13)
+    } else {
+        text("").size(13)
+    };
+
+    column![
         text("自动化操作（MAA）").size(20),
         pick_list(
             Win32InputMethodConfig::ALL.to_vec(),
@@ -803,10 +1472,13 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
         .spacing(8),
         text("提示：仅 ADB/窗口源支持自动化；显示器源会返回失败。Win32 输入方法仅对窗口源生效。")
             .size(13),
+        mode_warning,
     ]
-    .spacing(8);
+    .spacing(8)
+    .into()
+}
 
-    // Training panel
+fn view_training_panel(app: &CannotMaxApp) -> Element<'_, Message> {
     let train_progress_text = if let Some(p) = &app.training_progress {
         format!(
             "Epoch {}/{} | 训练损失 {:.4} | 训练准确率 {:.2}% | 验证损失 {:.4} | 验证准确率 {:.2}% | 最佳准确率 {:.2}% | 最佳损失 {:.4} | 已用 {:.1}s | 预估剩余 {:.1}s | {}",
@@ -821,7 +1493,7 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
         "暂无训练进度".to_string()
     };
 
-    let training_panel = column![
+    column![
         text("模型训练（UnitAwareTransformer）").size(20),
         text_input("数据文件", &app.train_data_file_text).on_input(Message::TrainDataFileChanged),
         row![
@@ -842,82 +1514,54 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
             .on_press_maybe((!app.training_busy).then_some(Message::StartTraining)),
         text(train_progress_text).size(13),
     ]
-    .spacing(8);
+    .spacing(8)
+    .into()
+}
 
-    // Auto fetch panel
-    let auto_fetch_stats_text = if app.auto_fetch_running {
-        let stats = app.auto_fetch.stats_snapshot();
-        format!(
-            "总填写: {} | 错误: {} | 运行: {:.0}s",
-            stats.total_fill_count, stats.incorrect_fill_count, stats.elapsed_secs
-        )
+fn view_visualization_toggle(app: &CannotMaxApp) -> Element<'_, Message> {
+    row![
+        text("识别结果可视化").size(16),
+        checkbox(app.visualization_enabled).on_toggle(|_| Message::ToggleVisualization),
+        text(if app.visualization_enabled { "已开启" } else { "已关闭" }).size(13),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn view_history_panel(app: &CannotMaxApp) -> Element<'_, Message> {
+    if !app.history_visible {
+        return row![
+            button("显示历史面板").on_press(Message::ToggleHistoryPanel),
+        ]
+        .into();
+    }
+
+    let history_content = if app.history_results.is_empty() {
+        vec![text("选择输入源并识别后，将自动匹配历史对局").size(13).into()]
     } else {
-        "暂无统计".to_string()
+        app.history_results
+            .iter()
+            .map(|row| text(row).size(13).into())
+            .collect::<Vec<Element<'_, Message>>>()
     };
 
-    let auto_fetch_panel = column![
-        text("自动获取").size(20),
+    column![
         row![
-            button(if app.auto_fetch_running { "停止自动获取" } else { "启动自动获取" })
-                .on_press(Message::ToggleAutoFetch),
-            checkbox(app.config.invest_mode)
-                .on_toggle(Message::InvestModeToggled),
-        ].spacing(12).align_y(Alignment::Center),
-        text(auto_fetch_stats_text).size(13),
-    ]
-    .spacing(8);
-
-    let path_panel = column![
-        text("路径与资源").size(20),
-        text_input("资源根目录", &app.resource_root_text).on_input(Message::ResourceRootChanged),
-        text_input("模型路径", &app.model_path_text).on_input(Message::ModelPathChanged),
-        text_input("MAA 动态库路径", &app.maa_library_path_text)
-            .on_input(Message::MaaLibraryPathChanged),
-        text_input("OCR 模型目录", &app.ocr_model_path_text).on_input(Message::OcrModelPathChanged),
-        text_input("deepseek-ocr-cli 路径", &app.deepseek_cli_path_text)
-            .on_input(Message::DeepseekCliPathChanged),
-        pick_list(
-            DeepseekCliModel::ALL.to_vec(),
-            Some(app.config.deepseek_model),
-            Message::DeepseekModelSelected
-        )
-        .placeholder("选择 deepseek-ocr 模型"),
-        text_input("PaddleOCR-VL 设备", &app.deepseek_device_text)
-            .on_input(Message::DeepseekDeviceChanged),
-        pick_list(
-            vec![OcrBackend::Maa, OcrBackend::DeepseekCli],
-            Some(app.config.ocr_backend),
-            Message::OcrBackendSelected
-        )
-        .placeholder("选择 OCR 后端"),
-        text(&app.resources_summary).size(14),
-    ]
-    .spacing(8);
-
-    let roi_panel = column![
-        text("ROI").size(20),
-        row![
-            text_input("x", &app.roi_x)
-                .on_input(Message::RoiXChanged)
-                .width(Length::FillPortion(1)),
-            text_input("y", &app.roi_y)
-                .on_input(Message::RoiYChanged)
-                .width(Length::FillPortion(1)),
-            text_input("w", &app.roi_width)
-                .on_input(Message::RoiWidthChanged)
-                .width(Length::FillPortion(1)),
-            text_input("h", &app.roi_height)
-                .on_input(Message::RoiHeightChanged)
-                .width(Length::FillPortion(1)),
+            text("历史对局匹配").size(20),
+            button("隐藏").on_press(Message::ToggleHistoryPanel),
         ]
         .spacing(8),
+        scrollable(column(history_content).spacing(4)).height(200),
     ]
-    .spacing(8);
+    .spacing(8)
+    .into()
+}
 
-    let preview_panel: Element<'_, _> = if let Some(handle) = &app.preview {
+fn view_preview(app: &CannotMaxApp) -> Element<'_, Message> {
+    if let Some(handle) = &app.preview {
         column![
             text("当前预览").size(20),
-            image(handle.clone()).width(Length::Fill).height(320),
+            image(handle.clone()).width(Length::Fill).height(Length::FillPortion(2)),
         ]
         .spacing(8)
         .into()
@@ -930,8 +1574,10 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
         ]
         .spacing(8)
         .into()
-    };
+    }
+}
 
+fn view_result_panel(app: &CannotMaxApp) -> Element<'_, Message> {
     let prediction_text = if let Some(prediction) = &app.prediction {
         format!(
             "胜方: {} | 左 {:.1}% | 右 {:.1}% | 信心 {:.1}%",
@@ -953,70 +1599,24 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
             .collect::<Vec<Element<'_, Message>>>()
     };
 
-    let result_panel = column![
+    column![
         text("识别与预测").size(20),
         text(prediction_text).size(16),
         scrollable(column(recognized).spacing(6)).height(220),
     ]
-    .spacing(8);
+    .spacing(8)
+    .into()
+}
 
-    // Special monster messages
-    let special_panel = if app.special_messages.is_empty() {
-        column![]
+fn view_special_panel(app: &CannotMaxApp) -> Element<'_, Message> {
+    if app.special_messages.is_empty() {
+        column![].into()
     } else {
         column![
             text("特殊怪物提示").size(16),
             text(&app.special_messages).size(13),
         ]
         .spacing(4)
-    };
-
-    // History panel (toggle)
-    let history_panel = if app.history_visible {
-        let history_content = if app.history_results.is_empty() {
-            vec![text("选择输入源并识别后，将自动匹配历史对局").size(13).into()]
-        } else {
-            app.history_results
-                .iter()
-                .map(|row| text(row).size(13).into())
-                .collect::<Vec<Element<'_, Message>>>()
-        };
-        column![
-            text("历史对局匹配").size(20),
-            scrollable(column(history_content).spacing(4)).height(200),
-        ]
-        .spacing(8)
-    } else {
-        column![]
-    };
-
-    container(scrollable(
-        column![
-            header,
-            controls,
-            row![
-                container(column![
-                    path_panel,
-                    roi_panel,
-                    automation_panel,
-                    training_panel,
-                    auto_fetch_panel,
-                    row![
-                        button(if app.history_visible { "隐藏历史面板" } else { "显示历史面板" })
-                            .on_press(Message::ToggleHistoryPanel),
-                    ],
-                    history_panel,
-                ].spacing(16))
-                    .width(Length::FillPortion(1)),
-                container(column![preview_panel, result_panel, special_panel].spacing(16))
-                    .width(Length::FillPortion(2)),
-            ]
-            .spacing(20),
-        ]
-        .spacing(20)
-        .padding(20),
-    ))
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+        .into()
+    }
 }

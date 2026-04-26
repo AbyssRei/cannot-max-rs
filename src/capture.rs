@@ -11,15 +11,18 @@ use windows_capture::dxgi_duplication_api::DxgiDuplicationApi;
 use windows_capture::monitor::Monitor;
 
 pub fn discover_sources(game_mode: GameMode) -> CaptureCatalog {
-    let adb_devices = Toolkit::find_adb_devices()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|device| AdbDeviceInfo {
-            name: device.name,
-            adb_path: device.adb_path,
-            address: device.address,
-        })
-        .collect();
+    let adb_devices = match game_mode {
+        GameMode::WindowOnly => Vec::new(),
+        _ => Toolkit::find_adb_devices()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|device| AdbDeviceInfo {
+                name: device.name,
+                adb_path: device.adb_path,
+                address: device.address,
+            })
+            .collect(),
+    };
 
     let windows = discover_windows(game_mode);
     let monitors = discover_monitors();
@@ -29,6 +32,15 @@ pub fn discover_sources(game_mode: GameMode) -> CaptureCatalog {
         windows,
         monitors,
     }
+}
+
+/// 检查画面宽高比是否为 16:9（允许 ±2% 误差）
+pub fn is_16by9(width: u32, height: u32) -> bool {
+    if height == 0 {
+        return false;
+    }
+    let ratio = width as f64 / height as f64;
+    (ratio - 16.0 / 9.0).abs() < 0.04
 }
 
 pub fn capture_frame(
@@ -84,9 +96,11 @@ fn window_priority(window: &DesktopWindowInfo, game_mode: GameMode) -> (u8, Stri
 
     let group = match game_mode {
         GameMode::Pc if is_game_window => 0,
+        GameMode::WindowOnly if is_game_window => 0,
         GameMode::Emulator if is_emulator_window => 0,
         GameMode::Pc if is_emulator_window => 2,
         GameMode::Emulator if is_game_window => 2,
+        GameMode::WindowOnly if is_emulator_window => 2,
         _ => 1,
     };
 

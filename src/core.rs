@@ -86,6 +86,7 @@ impl fmt::Display for CaptureSource {
 pub enum GameMode {
     Emulator,
     Pc,
+    WindowOnly,
 }
 
 impl fmt::Display for GameMode {
@@ -93,6 +94,33 @@ impl fmt::Display for GameMode {
         match self {
             Self::Emulator => f.write_str("模拟器模式"),
             Self::Pc => f.write_str("PC 模式"),
+            Self::WindowOnly => f.write_str("普通窗口模式"),
+        }
+    }
+}
+
+impl GameMode {
+    pub const ALL: [Self; 3] = [Self::Emulator, Self::Pc, Self::WindowOnly];
+}
+
+/// 界面模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiMode {
+    Normal,
+    Developer,
+}
+
+impl Default for UiMode {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+impl fmt::Display for UiMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Normal => f.write_str("普通模式"),
+            Self::Developer => f.write_str("开发者模式"),
         }
     }
 }
@@ -376,20 +404,127 @@ impl SourceChoice {
     fn priority(&self, game_mode: GameMode) -> (u8, String) {
         let source_rank = match (&self.source, game_mode) {
             (CaptureSource::DesktopWindow(_), GameMode::Pc) => 0,
+            (CaptureSource::DesktopWindow(_), GameMode::WindowOnly) => 0,
             (CaptureSource::Monitor(_), GameMode::Pc) => 1,
+            (CaptureSource::Monitor(_), GameMode::WindowOnly) => 1,
             (CaptureSource::Adb(_), GameMode::Emulator) => 0,
             (CaptureSource::DesktopWindow(_), GameMode::Emulator) => 1,
             (CaptureSource::Monitor(_), GameMode::Emulator) => 2,
             (CaptureSource::Adb(_), GameMode::Pc) => 2,
+            (CaptureSource::Adb(_), GameMode::WindowOnly) => 3,
         };
 
         (source_rank, self.label.to_lowercase())
     }
 }
 
+// ── 阵容管理类型 ──
+
+/// 单个槽位的阵容条目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RosterSlot {
+    pub monster_id: Option<u32>,
+    pub monster_name: Option<String>,
+    pub count: u32,
+}
+
+impl Default for RosterSlot {
+    fn default() -> Self {
+        Self {
+            monster_id: None,
+            monster_name: None,
+            count: 0,
+        }
+    }
+}
+
+/// 完整阵容（左3 + 右3）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Roster {
+    pub left: [RosterSlot; 3],
+    pub right: [RosterSlot; 3],
+}
+
+/// 阵容来源标记
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterSource {
+    AutoRecognized,
+    ManualInput,
+}
+
+/// 手动阵容面板状态
+#[derive(Debug, Clone)]
+pub struct RosterPanelState {
+    pub roster: Roster,
+    pub source: RosterSource,
+    pub expanded: bool,
+    pub monster_picker_open: bool,
+    pub picker_target: Option<(Side, usize)>,
+}
+
+impl Default for RosterPanelState {
+    fn default() -> Self {
+        Self {
+            roster: Roster::default(),
+            source: RosterSource::AutoRecognized,
+            expanded: false,
+            monster_picker_open: false,
+            picker_target: None,
+        }
+    }
+}
+
+// ── 模型扫描类型 ──
+
+/// 扫描到的模型文件信息
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelEntry {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub file_size: u64,
+}
+
+/// 模型选择状态
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelSelection {
+    Scanned(ModelEntry),
+    Custom(PathBuf),
+    OtherOption,
+}
+
+impl fmt::Display for ModelSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Scanned(entry) => f.write_str(&entry.file_name),
+            Self::Custom(path) => write!(f, "{}", path.display()),
+            Self::OtherOption => f.write_str("选择其他模型…"),
+        }
+    }
+}
+
+// ── 可视化类型 ──
+
+/// 识别结果可视化标注
+#[derive(Debug, Clone)]
+pub struct VisualizationOverlay {
+    pub roi_rect: Option<Roi>,
+    pub unit_annotations: Vec<UnitAnnotation>,
+}
+
+/// 单个单位的可视化标注
+#[derive(Debug, Clone)]
+pub struct UnitAnnotation {
+    pub slot_index: usize,
+    pub side: Side,
+    pub unit_id: String,
+    pub count: u32,
+    pub confidence: f32,
+    pub bbox: Roi,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AdbDeviceInfo, CaptureCatalog, CaptureSource, DesktopWindowInfo, GameMode, MonitorInfo, Roi};
+    use super::{AdbDeviceInfo, CaptureCatalog, CaptureSource, DesktopWindowInfo, GameMode, MonitorInfo, Roi, UiMode};
 
     #[test]
     fn clamp_roi_to_bounds() {
@@ -453,5 +588,63 @@ mod tests {
 
         let first = catalog.preferred_source(GameMode::Emulator).unwrap();
         assert!(matches!(first.source, CaptureSource::Adb(_)));
+    }
+
+    #[test]
+    fn window_only_mode_prefers_windows() {
+        let catalog = CaptureCatalog {
+            adb_devices: vec![AdbDeviceInfo {
+                name: "emu".to_string(),
+                adb_path: std::path::PathBuf::from("adb.exe"),
+                address: "127.0.0.1:5555".to_string(),
+            }],
+            windows: vec![DesktopWindowInfo {
+                hwnd: 42,
+                title: "Arknights".to_string(),
+                class_name: "UnityWndClass".to_string(),
+                process_name: "Arknights.exe".to_string(),
+            }],
+            monitors: vec![MonitorInfo {
+                index: 1,
+                name: "Display 1".to_string(),
+                width: 1920,
+                height: 1080,
+            }],
+        };
+
+        let first = catalog.preferred_source(GameMode::WindowOnly).unwrap();
+        assert!(matches!(first.source, CaptureSource::DesktopWindow(42)));
+    }
+
+    #[test]
+    fn game_mode_display() {
+        assert_eq!(GameMode::Emulator.to_string(), "模拟器模式");
+        assert_eq!(GameMode::Pc.to_string(), "PC 模式");
+        assert_eq!(GameMode::WindowOnly.to_string(), "普通窗口模式");
+    }
+
+    #[test]
+    fn ui_mode_display() {
+        assert_eq!(UiMode::Normal.to_string(), "普通模式");
+        assert_eq!(UiMode::Developer.to_string(), "开发者模式");
+    }
+
+    #[test]
+    fn roster_slot_default_is_empty() {
+        let slot = super::RosterSlot::default();
+        assert!(slot.monster_id.is_none());
+        assert!(slot.monster_name.is_none());
+        assert_eq!(slot.count, 0);
+    }
+
+    #[test]
+    fn roster_default_is_all_empty() {
+        let roster = super::Roster::default();
+        for slot in &roster.left {
+            assert!(slot.monster_id.is_none());
+        }
+        for slot in &roster.right {
+            assert!(slot.monster_id.is_none());
+        }
     }
 }

@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::core::{CaptureCatalog, CaptureSource};
+use crate::core::{CaptureCatalog, CaptureSource, GameMode};
 use crate::maa_controller::MaaControllerSession;
 
 #[derive(Debug, Clone)]
@@ -7,6 +7,17 @@ pub enum AutomationAction {
     Click { x: i32, y: i32 },
     InputText { text: String },
     Inactive,
+}
+
+/// 检查当前模式是否支持自动化操作
+pub fn is_automation_allowed(game_mode: GameMode, source: &CaptureSource) -> Result<(), String> {
+    match game_mode {
+        GameMode::WindowOnly => Err("普通窗口模式不支持自动化操作".to_string()),
+        _ => match source {
+            CaptureSource::Monitor(_) => Err("显示器源不支持自动化操作".to_string()),
+            _ => Ok(()),
+        },
+    }
 }
 
 pub fn execute_action(

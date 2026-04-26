@@ -197,6 +197,10 @@ mod tests {
             train_config: TrainConfig::default(),
             monster_count: 60,
             field_feature_count: 0,
+            ui_mode: crate::core::UiMode::Normal,
+            visualization_enabled: false,
+            roster_expanded: false,
+            last_roster: None,
         }
     }
 

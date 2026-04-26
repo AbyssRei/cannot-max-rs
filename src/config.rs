@@ -1,4 +1,4 @@
-use crate::core::{CaptureSource, GameMode, Roi, TrainConfig};
+use crate::core::{CaptureSource, GameMode, Roi, Roster, TrainConfig, UiMode};
 use crate::ocr::{DeepseekCliModel, OcrBackend};
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
@@ -64,6 +64,14 @@ pub struct AppConfig {
     pub monster_count: usize,
     #[serde(default = "AppConfig::default_field_feature_count")]
     pub field_feature_count: usize,
+    #[serde(default)]
+    pub ui_mode: UiMode,
+    #[serde(default)]
+    pub visualization_enabled: bool,
+    #[serde(default)]
+    pub roster_expanded: bool,
+    #[serde(default)]
+    pub last_roster: Option<Roster>,
 }
 
 impl Default for AppConfig {
@@ -86,13 +94,17 @@ impl Default for AppConfig {
             train_config: TrainConfig::default(),
             monster_count: Self::default_monster_count(),
             field_feature_count: Self::default_field_feature_count(),
+            ui_mode: UiMode::default(),
+            visualization_enabled: false,
+            roster_expanded: false,
+            last_roster: None,
         }
     }
 }
 
 impl AppConfig {
     pub const fn schema_version() -> u32 {
-        3
+        4
     }
 
     pub const fn default_monster_count() -> usize {
