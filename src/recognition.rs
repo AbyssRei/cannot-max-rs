@@ -17,9 +17,9 @@ pub const UNIT_REGIONS_REL: [(f32, f32, f32, f32); 6] = [
 
 /// 战斗区域 ROI（相对比例，基于全屏坐标）
 const BATTLE_ROI_REL: RelativeRoi = RelativeRoi {
-    x: 0.2473,
+    x: 0.2470,
     y: 0.8425,
-    width: 0.5053,
+    width: 0.5075,
     height: 0.1112,
 };
 
