@@ -6,9 +6,18 @@ use crate::core::{
 use crate::maa_controller::MaaControllerSession;
 use image::{ImageBuffer, Rgba, RgbaImage};
 use maa_framework::toolkit::Toolkit;
+use std::sync::{Arc, Mutex};
 use window_enumerator::WindowEnumerator;
+use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::dxgi_duplication_api::DxgiDuplicationApi;
+use windows_capture::frame::Frame;
+use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor;
+use windows_capture::settings::{
+    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+};
+use windows_capture::window::Window;
 
 pub fn discover_sources(game_mode: GameMode) -> CaptureCatalog {
     let adb_devices = match game_mode {
@@ -186,4 +195,85 @@ fn buffer_to_rgba(width: u32, height: u32, bytes: &[u8]) -> RgbaImage {
     }
 
     image
+}
+
+// ---- windows-capture GraphicsCaptureApi 窗口截图 ----
+
+/// 单帧捕获 handler：获取第一帧后立即停止
+struct SingleFrameCapture {
+    result: Arc<Mutex<Option<RgbaImage>>>,
+}
+
+#[derive(Debug)]
+struct SingleFrameCaptureError(String);
+
+impl std::fmt::Display for SingleFrameCaptureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for SingleFrameCaptureError {}
+
+impl GraphicsCaptureApiHandler for SingleFrameCapture {
+    type Flags = Arc<Mutex<Option<RgbaImage>>>;
+    type Error = SingleFrameCaptureError;
+
+    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            result: ctx.flags,
+        })
+    }
+
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        let width = frame.width();
+        let height = frame.height();
+        let buffer = frame
+            .buffer()
+            .map_err(|e| SingleFrameCaptureError(format!("buffer failed: {e}")))?;
+        let mut scratch = Vec::new();
+        let packed = buffer.as_nopadding_buffer(&mut scratch);
+
+        let rgba = buffer_to_rgba(width, height, packed);
+        *self.result.lock().unwrap() = Some(rgba);
+        capture_control.stop();
+        Ok(())
+    }
+}
+
+/// 使用 windows-capture GraphicsCaptureApi 截取窗口（原始分辨率）
+pub fn capture_window_native(hwnd: isize) -> Result<RgbaImage, String> {
+    let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+    let result: Arc<Mutex<Option<RgbaImage>>> = Arc::new(Mutex::new(None));
+    let result_clone = result.clone();
+
+    let settings = Settings::new(
+        window,
+        CursorCaptureSettings::WithoutCursor,
+        DrawBorderSettings::WithoutBorder,
+        SecondaryWindowSettings::Default,
+        MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default,
+        ColorFormat::Bgra8,
+        result_clone,
+    );
+
+    let control: CaptureControl<SingleFrameCapture, SingleFrameCaptureError> =
+        SingleFrameCapture::start_free_threaded(settings)
+            .map_err(|e| format!("start capture failed: {e}"))?;
+
+    // 等待捕获完成（handler 获取第一帧后会调用 stop）
+    control
+        .wait()
+        .map_err(|e| format!("capture wait failed: {e}"))?;
+
+    result
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "No frame captured".to_string())
 }

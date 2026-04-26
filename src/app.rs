@@ -1,6 +1,6 @@
 use crate::automation::{is_automation_allowed, execute_action, AutomationAction};
 use crate::auto_fetch::AutoFetch;
-use crate::capture::{discover_sources, is_16by9};
+use crate::capture::{capture_frame, capture_window_native, discover_sources, is_16by9};
 use crate::config::{AppConfig, Win32InputMethodConfig};
 use crate::core::{
     AnalysisOutput, CaptureCatalog, CaptureSource, GameMode, LrScheduler, ModelSelection, PredictionResult,
@@ -17,10 +17,10 @@ use crate::roster::RosterManager;
 use crate::training::TrainingPipeline;
 use crate::visualization::VisualizationRenderer;
 use iced::widget::{
-    button, checkbox, column, container, image, pick_list, row, scrollable, text, text_input,
+    button, canvas, checkbox, column, container, image, pick_list, row, scrollable, stack, text, text_input,
     Space,
 };
-use iced::{Alignment, Element, Length, Task, Theme};
+use iced::{Alignment, Color, Element, Event, Length, Point, Rectangle, Size, Task, Theme};
 
 pub fn run() -> iced::Result {
     iced::application(boot, update, view)
@@ -100,6 +100,14 @@ pub enum Message {
     RoiDragStart((f32, f32)),
     RoiDragging((f32, f32)),
     RoiDragEnd,
+    // ── 新增：ROI 框选窗口 ──
+    OpenRoiSelector,
+    RoiSelectorPressAt((f32, f32)),  // 归一化坐标 (0.0~1.0)
+    RoiSelectorRelease,
+    RoiSelectorMove((f32, f32)),     // 归一化坐标 (0.0~1.0)
+    RoiSelectorDragEnd,
+    RoiSelectorCancel,
+    RoiSelectorImageReady(image::Handle, u32, u32),
     // ── 新增：训练高级配置 ──
     TrainDropoutChanged(String),
     TrainLrSchedulerSelected(LrScheduler),
@@ -188,6 +196,12 @@ pub struct CannotMaxApp {
     visualization_enabled: bool,
     visualization_overlay: Option<crate::core::VisualizationOverlay>,
     roi_dragging: Option<RoiDragState>,
+    // ── 新增：ROI 框选窗口状态 ──
+    roi_selector_active: bool,
+    roi_selector_image: Option<image::Handle>,
+    roi_selector_drag: Option<RoiDragState>,
+    roi_selector_mouse_pressed: bool,
+    roi_selector_image_size: (u32, u32),
     // ── 新增：训练高级配置 ──
     train_dropout_text: String,
     train_gradient_clip_norm_text: String,
@@ -276,9 +290,13 @@ impl CannotMaxApp {
             special_messages: String::new(),
             // 新增字段
             ui_mode: config.ui_mode,
-            roster_manager: RosterManager {
-                panel: roster_panel,
-                available_monsters: Vec::new(),
+            roster_manager: {
+                let mut mgr = RosterManager::new();
+                mgr.panel = roster_panel;
+                if let Ok(store) = ResourceStore::load(&config) {
+                    mgr.load_monsters(&store);
+                }
+                mgr
             },
             monster_count_input: String::new(),
             available_models,
@@ -286,6 +304,11 @@ impl CannotMaxApp {
             visualization_enabled: config.visualization_enabled,
             visualization_overlay: None,
             roi_dragging: None,
+            roi_selector_active: false,
+            roi_selector_image: None,
+            roi_selector_drag: None,
+            roi_selector_mouse_pressed: false,
+            roi_selector_image_size: (0, 0),
             // 新增：训练高级配置
             train_dropout_text: format!("{:.2}", tc.dropout),
             train_gradient_clip_norm_text: format!("{:.2}", tc.gradient_clip_norm),
@@ -680,6 +703,10 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
         }
         Message::ResourceRootChanged(value) => {
             app.resource_root_text = value;
+            // 重新加载怪物列表
+            if let Ok(store) = ResourceStore::load(&app.config) {
+                app.roster_manager.load_monsters(&store);
+            }
             Task::none()
         }
         Message::ModelPathChanged(value) => {
@@ -1105,19 +1132,132 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
         }
         Message::RoiDragEnd => {
             if let Some(state) = app.roi_dragging.take() {
-                // 将相对坐标转换为ROI
-                let x = (state.start.0.min(state.current.0) * 1280.0) as u32;
-                let y = (state.start.1.min(state.current.1) * 720.0) as u32;
-                let w = ((state.current.0 - state.start.0).abs() * 1280.0) as u32;
-                let h = ((state.current.1 - state.start.1).abs() * 720.0) as u32;
-                app.roi_x = x.to_string();
-                app.roi_y = y.to_string();
-                app.roi_width = w.to_string();
-                app.roi_height = h.to_string();
+                // 将相对坐标转换为ROI（使用当前配置的帧大小或默认1280x720）
+                let frame_w = app.preview.as_ref().map_or(1280.0, |_| {
+                    // 尝试从最近的分析结果获取帧大小
+                    1280.0 // iced的mouse_area给的是组件内像素坐标，需要根据实际图片尺寸换算
+                });
+                let frame_h = app.preview.as_ref().map_or(720.0, |_| 720.0);
+                let x = (state.start.0.min(state.current.0)) as u32;
+                let y = (state.start.1.min(state.current.1)) as u32;
+                let w = ((state.current.0 - state.start.0).abs()) as u32;
+                let h = ((state.current.1 - state.start.1).abs()) as u32;
+                if w > 5 && h > 5 {
+                    app.roi_x = x.to_string();
+                    app.roi_y = y.to_string();
+                    app.roi_width = w.to_string();
+                    app.roi_height = h.to_string();
+                }
             }
             Task::none()
         }
-        // ── 新增：训练高级配置 ──
+        // ── ROI 框选窗口 ──
+        Message::OpenRoiSelector => {
+            // 截取当前选中源的图片
+            if let Some(source) = &app.selected_source {
+                let source = source.source.clone();
+                let catalog = app.catalog.clone();
+                let config = app.config.clone();
+                Task::perform(
+                    async move {
+                        match &source {
+                            CaptureSource::DesktopWindow(hwnd) => {
+                                // 窗口模式使用 windows-capture 截取原始分辨率
+                                capture_window_native(*hwnd)
+                            }
+                            _ => {
+                                // ADB / 显示器模式使用 MAA 截图
+                                capture_frame(&source, &config, &catalog)
+                                    .map(|f| f.image)
+                            }
+                        }
+                    },
+                    |result: Result<::image::RgbaImage, String>| {
+                        // 将截图转为Handle
+                        match result {
+                            Ok(img) => {
+                                let (w, h) = (img.width(), img.height());
+                                let handle = image::Handle::from_rgba(w, h, img.into_raw());
+                                Message::RoiSelectorImageReady(handle, w, h)
+                            }
+                            Err(_) => Message::RoiSelectorCancel,
+                        }
+                    },
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::RoiSelectorPressAt(pos) => {
+            // 鼠标按下，用Canvas传来的位置作为框选起点
+            app.roi_selector_mouse_pressed = true;
+            app.roi_selector_drag = Some(RoiDragState {
+                start: pos,
+                current: pos,
+            });
+            Task::none()
+        }
+        Message::RoiSelectorRelease => {
+            app.roi_selector_mouse_pressed = false;
+            // 鼠标释放时，如果有有效框选区域就保留，否则清除
+            if let Some(state) = &app.roi_selector_drag {
+                let w = (state.current.0 - state.start.0).abs();
+                let h = (state.current.1 - state.start.1).abs();
+                // 归一化坐标下，阈值约0.5%
+                if w < 0.005 || h < 0.005 {
+                    app.roi_selector_drag = None;
+                }
+            }
+            Task::none()
+        }
+        Message::RoiSelectorMove(pos) => {
+            // Canvas传来的鼠标移动位置（仅按下时有效）
+            if app.roi_selector_mouse_pressed {
+                if let Some(state) = &mut app.roi_selector_drag {
+                    state.current = pos;
+                }
+            }
+            Task::none()
+        }
+        Message::RoiSelectorDragEnd => {
+            if let Some(state) = app.roi_selector_drag.take() {
+                let (img_w, img_h) = app.roi_selector_image_size;
+                if img_w > 0 && img_h > 0 {
+                    // 归一化坐标(0.0~1.0) * 图片原始尺寸 = 图片像素坐标
+                    let x1 = (state.start.0 * img_w as f32) as u32;
+                    let y1 = (state.start.1 * img_h as f32) as u32;
+                    let x2 = (state.current.0 * img_w as f32) as u32;
+                    let y2 = (state.current.1 * img_h as f32) as u32;
+                    let x = x1.min(x2);
+                    let y = y1.min(y2);
+                    let w = x2.abs_diff(x1);
+                    let h = y2.abs_diff(y1);
+                    if w > 5 && h > 5 {
+                        app.roi_x = x.to_string();
+                        app.roi_y = y.to_string();
+                        app.roi_width = w.to_string();
+                        app.roi_height = h.to_string();
+                    }
+                }
+            }
+            app.roi_selector_active = false;
+            app.roi_selector_image = None;
+            Task::none()
+        }
+        Message::RoiSelectorCancel => {
+            app.roi_selector_active = false;
+            app.roi_selector_image = None;
+            app.roi_selector_drag = None;
+            app.roi_selector_mouse_pressed = false;
+            Task::none()
+        }
+        Message::RoiSelectorImageReady(handle, w, h) => {
+            app.roi_selector_active = true;
+            app.roi_selector_image = Some(handle);
+            app.roi_selector_image_size = (w, h);
+            app.roi_selector_drag = None;
+            Task::none()
+        }
         Message::TrainDropoutChanged(value) => {
             app.train_dropout_text = value;
             Task::none()
@@ -1300,9 +1440,14 @@ pub fn view(app: &CannotMaxApp) -> Element<'_, Message> {
         UiMode::Developer => view_developer_mode(app),
     };
 
-    container(scrollable(
+    // ROI框选覆盖层（优先级最高）
+    if app.roi_selector_active {
+        return view_roi_selector_overlay(app);
+    }
+
+    container(
         column![header, content].spacing(20).padding(20),
-    ))
+    )
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
@@ -1392,6 +1537,13 @@ fn view_normal_mode(app: &CannotMaxApp) -> Element<'_, Message> {
         column![].into()
     };
 
+    // ROI面板（普通窗口模式下始终显示，其他模式下不显示）
+    let roi_panel = if app.config.game_mode == GameMode::WindowOnly {
+        view_roi_panel(app)
+    } else {
+        column![].into()
+    };
+
     // 识别结果可视化开关
     let visualization_toggle = view_visualization_toggle(app);
 
@@ -1408,22 +1560,27 @@ fn view_normal_mode(app: &CannotMaxApp) -> Element<'_, Message> {
     };
 
     row![
-        container(scrollable(column![
+        scrollable(column![
             controls,
             model_panel,
             roster_panel,
             auto_fetch_panel,
+            roi_panel,
             visualization_toggle,
-        ].spacing(16)).width(Length::Fill).height(Length::Fill))
-            .width(Length::FillPortion(1)),
-        container(scrollable(column![
+        ].spacing(16).width(Length::Fill))
+            .width(Length::FillPortion(1))
+            .height(Length::Fill),
+        scrollable(column![
             preview_panel,
             result_panel,
             special_panel,
-        ].spacing(16)).width(Length::Fill).height(Length::Fill))
-            .width(Length::FillPortion(2)),
+        ].spacing(16).width(Length::Fill))
+            .width(Length::FillPortion(2))
+            .height(Length::Fill),
     ]
     .spacing(20)
+    .width(Length::Fill)
+    .height(Length::Fill)
     .push(monster_picker_overlay)
     .into()
 }
@@ -1496,7 +1653,7 @@ fn view_developer_mode(app: &CannotMaxApp) -> Element<'_, Message> {
     };
 
     row![
-        container(scrollable(column![
+        scrollable(column![
             controls,
             model_panel,
             roster_panel,
@@ -1507,16 +1664,20 @@ fn view_developer_mode(app: &CannotMaxApp) -> Element<'_, Message> {
             training_panel,
             visualization_toggle,
             history_panel,
-        ].spacing(16)).width(Length::Fill).height(Length::Fill))
-            .width(Length::FillPortion(1)),
-        container(scrollable(column![
+        ].spacing(16).width(Length::Fill))
+            .width(Length::FillPortion(1))
+            .height(Length::Fill),
+        scrollable(column![
             preview_panel,
             result_panel,
             special_panel,
-        ].spacing(16)).width(Length::Fill).height(Length::Fill))
-            .width(Length::FillPortion(2)),
+        ].spacing(16).width(Length::Fill))
+            .width(Length::FillPortion(2))
+            .height(Length::Fill),
     ]
     .spacing(20)
+    .width(Length::Fill)
+    .height(Length::Fill)
     .push(monster_picker_overlay)
     .into()
 }
@@ -1729,23 +1890,28 @@ fn view_path_panel(app: &CannotMaxApp) -> Element<'_, Message> {
 
 fn view_roi_panel(app: &CannotMaxApp) -> Element<'_, Message> {
     column![
-        text("ROI").size(20),
+        text("ROI 区域").size(20),
+        button("选择ROI区域（截图框选）").on_press(Message::OpenRoiSelector),
         row![
+            text("x:").size(13),
             text_input("x", &app.roi_x)
                 .on_input(Message::RoiXChanged)
                 .width(Length::FillPortion(1)),
+            text("y:").size(13),
             text_input("y", &app.roi_y)
                 .on_input(Message::RoiYChanged)
                 .width(Length::FillPortion(1)),
+            text("w:").size(13),
             text_input("w", &app.roi_width)
                 .on_input(Message::RoiWidthChanged)
                 .width(Length::FillPortion(1)),
+            text("h:").size(13),
             text_input("h", &app.roi_height)
                 .on_input(Message::RoiHeightChanged)
                 .width(Length::FillPortion(1)),
         ]
-        .spacing(8),
-        text("提示：在普通窗口模式下可在预览画面上拖拽框选ROI").size(13),
+        .spacing(4),
+        text("点击\"选择ROI区域\"按钮截取窗口图片并框选，或手动输入坐标").size(12),
     ]
     .spacing(8)
     .into()
@@ -1924,16 +2090,14 @@ fn view_preview(app: &CannotMaxApp) -> Element<'_, Message> {
             scrollable(row(items).spacing(8)).height(120).into()
         };
 
-        // 普通窗口模式下显示ROI框提示
-        let roi_hint: Element<_> = if app.config.game_mode == GameMode::WindowOnly {
-            text("提示：可在预览画面上拖拽框选ROI").size(13).into()
-        } else {
-            column![].into()
-        };
-
-        // ROI拖拽中的视觉反馈
-        let roi_drag_hint: Element<_> = if app.roi_dragging.is_some() {
-            text("正在框选ROI区域…").size(13).into()
+        // 普通窗口模式下显示ROI设置提示和当前ROI信息
+        let roi_info: Element<_> = if app.config.game_mode == GameMode::WindowOnly {
+            let roi = app.current_roi().unwrap_or_default();
+            column![
+                text("普通窗口模式 - ROI区域选择").size(14),
+                text("请在下方ROI面板中输入坐标，或点击\"识别并预测\"使用默认ROI").size(12),
+                text(format!("当前ROI: x={} y={} w={} h={}", roi.x, roi.y, roi.width, roi.height)).size(12),
+            ].spacing(4).into()
         } else {
             column![].into()
         };
@@ -1941,8 +2105,7 @@ fn view_preview(app: &CannotMaxApp) -> Element<'_, Message> {
         column![
             text("当前预览").size(20),
             image(handle.clone()).width(Length::Fill).height(Length::FillPortion(2)),
-            roi_hint,
-            roi_drag_hint,
+            roi_info,
             text("槽位截图").size(16),
             slot_gallery,
         ]
@@ -1951,7 +2114,7 @@ fn view_preview(app: &CannotMaxApp) -> Element<'_, Message> {
     } else {
         column![
             text("当前预览").size(20),
-            container(text("尚未生成预览"))
+            container(text("尚未生成预览 - 请先选择输入源并点击识别"))
                 .width(Length::Fill)
                 .height(320),
         ]
@@ -2002,6 +2165,230 @@ fn view_special_panel(app: &CannotMaxApp) -> Element<'_, Message> {
         .spacing(4)
         .into()
     }
+}
+
+/// ROI框选Canvas - 绘制框选矩形并处理鼠标交互
+struct RoiSelectorCanvas {
+    /// 框选区域 (相对于Canvas的像素坐标)
+    selection: Option<((f32, f32), (f32, f32))>,
+    /// 是否正在按下鼠标
+    pressed: bool,
+}
+
+impl RoiSelectorCanvas {
+    fn new(selection: Option<((f32, f32), (f32, f32))>, pressed: bool) -> Self {
+        Self { selection, pressed }
+    }
+}
+
+impl canvas::Program<Message> for RoiSelectorCanvas {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut (),
+        event: &Event,
+        bounds: Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> Option<canvas::Action<Message>> {
+        match event {
+            Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                if let Some(pos) = cursor.position_in(bounds) {
+                    // 归一化坐标：像素坐标 / 显示区域尺寸
+                    let nx = pos.x / bounds.width;
+                    let ny = pos.y / bounds.height;
+                    Some(canvas::Action::publish(Message::RoiSelectorPressAt((nx, ny))))
+                } else {
+                    None
+                }
+            }
+            Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                Some(canvas::Action::publish(Message::RoiSelectorRelease))
+            }
+            Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
+                if self.pressed {
+                    if let Some(pos) = cursor.position_in(bounds) {
+                        let nx = pos.x / bounds.width;
+                        let ny = pos.y / bounds.height;
+                        Some(canvas::Action::publish(Message::RoiSelectorMove((nx, ny))))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &(),
+        _bounds: Rectangle,
+        cursor: iced::mouse::Cursor,
+    ) -> iced::mouse::Interaction {
+        if cursor.is_over(_bounds) {
+            iced::mouse::Interaction::Crosshair
+        } else {
+            iced::mouse::Interaction::default()
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let bw = bounds.width;
+        let bh = bounds.height;
+
+        // 绘制框选矩形（归一化坐标 * 显示区域尺寸 = 显示像素坐标）
+        if let Some((start, end)) = self.selection {
+            let x1 = start.0 * bw;
+            let y1 = start.1 * bh;
+            let x2 = end.0 * bw;
+            let y2 = end.1 * bh;
+
+            let left = x1.min(x2);
+            let top = y1.min(y2);
+            let w = (x2 - x1).abs();
+            let h = (y2 - y1).abs();
+
+            let dim_color = Color::from_rgba(0.0, 0.0, 0.0, 0.5);
+
+            // 绘制框选区域外的半透明遮罩
+            if top > 0.0 {
+                let rect = canvas::Path::rectangle(Point::ORIGIN, Size::new(bw, top));
+                frame.fill(&rect, dim_color);
+            }
+            if top + h < bh {
+                let rect = canvas::Path::rectangle(
+                    Point::new(0.0, top + h),
+                    Size::new(bw, bh - top - h),
+                );
+                frame.fill(&rect, dim_color);
+            }
+            if left > 0.0 {
+                let rect = canvas::Path::rectangle(
+                    Point::new(0.0, top),
+                    Size::new(left, h),
+                );
+                frame.fill(&rect, dim_color);
+            }
+            if left + w < bw {
+                let rect = canvas::Path::rectangle(
+                    Point::new(left + w, top),
+                    Size::new(bw - left - w, h),
+                );
+                frame.fill(&rect, dim_color);
+            }
+
+            // 绘制框选矩形边框（绿色）
+            let sel_rect = canvas::Path::rectangle(Point::new(left, top), Size::new(w, h));
+            let stroke = canvas::Stroke::default()
+                .with_color(Color::from_rgb(0.0, 1.0, 0.4))
+                .with_width(2.0);
+            frame.stroke(&sel_rect, stroke);
+
+            // 绘制四角小方块
+            let corner_size = 8.0;
+            let corner_color = Color::from_rgb(0.0, 1.0, 0.4);
+            let corners = [
+                (left, top),
+                (left + w, top),
+                (left, top + h),
+                (left + w, top + h),
+            ];
+            for (cx, cy) in corners {
+                let corner = canvas::Path::rectangle(
+                    Point::new(cx - corner_size / 2.0, cy - corner_size / 2.0),
+                    Size::new(corner_size, corner_size),
+                );
+                frame.fill(&corner, corner_color);
+            }
+
+            // 绘制尺寸标注文字
+            let label = format!("{}x{}", w as u32, h as u32);
+            frame.fill_text(canvas::Text {
+                content: label,
+                position: Point::new(left + w / 2.0, top + h / 2.0),
+                color: Color::WHITE,
+                size: iced::Pixels(14.0),
+                ..canvas::Text::default()
+            });
+        }
+
+        vec![frame.into_geometry()]
+    }
+}
+
+/// ROI框选覆盖层
+fn view_roi_selector_overlay(app: &CannotMaxApp) -> Element<'_, Message> {
+    if !app.roi_selector_active || app.roi_selector_image.is_none() {
+        return column![].into();
+    }
+
+    // 框选状态信息（归一化坐标 * 图片原始尺寸 = 图片像素坐标）
+    let drag_info: Element<_> = if let Some(state) = &app.roi_selector_drag {
+        let (img_w, img_h) = app.roi_selector_image_size;
+        let x1 = (state.start.0 * img_w as f32) as u32;
+        let y1 = (state.start.1 * img_h as f32) as u32;
+        let x2 = (state.current.0 * img_w as f32) as u32;
+        let y2 = (state.current.1 * img_h as f32) as u32;
+        let x = x1.min(x2);
+        let y = y1.min(y2);
+        let w = x2.abs_diff(x1);
+        let h = y2.abs_diff(y1);
+        text(format!("框选区域: x={} y={} w={} h={}", x, y, w, h)).size(16).into()
+    } else {
+        text("在图片上按住鼠标左键拖拽框选ROI区域").size(16).into()
+    };
+
+    // 确认按钮
+    let confirm_button: Element<_> = if app.roi_selector_drag.is_some() {
+        row![
+            button("确认选择").on_press(Message::RoiSelectorDragEnd),
+            button("取消").on_press(Message::RoiSelectorCancel),
+        ].spacing(12).into()
+    } else {
+        row![
+            button("取消").on_press(Message::RoiSelectorCancel),
+        ].into()
+    };
+
+    // 图片 - ContentFit::Fill确保图片拉伸填满区域，无letterbox偏移
+    let img = image(app.roi_selector_image.clone().unwrap())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .content_fit(iced::ContentFit::Fill);
+
+    // Canvas绘制框选矩形并处理鼠标交互
+    let selection = app.roi_selector_drag.as_ref().map(|s| (s.start, s.current));
+    let roi_canvas = RoiSelectorCanvas::new(selection, app.roi_selector_mouse_pressed);
+    let canvas_widget = canvas(roi_canvas).width(Length::Fill).height(Length::Fill);
+
+    // 用stack叠加图片和Canvas（Canvas在上层，处理鼠标事件）
+    let img_stack = stack![img, canvas_widget].width(Length::Fill).height(Length::Fill);
+
+    container(
+        column![
+            text("ROI 区域选择").size(24),
+            drag_info,
+            container(img_stack)
+                .width(Length::Fill)
+                .height(Length::Fill),
+            confirm_button,
+        ]
+        .spacing(12),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// 怪物选择弹窗覆盖层

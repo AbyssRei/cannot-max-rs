@@ -385,32 +385,140 @@ pub struct SpecialMonsterInfo {
     pub lose_message: String,
 }
 
+/// 判断窗口是否为游戏相关窗口（PC模式下过滤系统窗口）
+fn is_game_window(window: &DesktopWindowInfo) -> bool {
+    // 已知的游戏进程名
+    const GAME_PROCESS_NAMES: &[&str] = &[
+        "Arknights.exe",
+        "arknights.exe",
+        "MuMuPlayer.exe",
+        "Nox.exe",
+        "BlueStacks.exe",
+        "HD-Player.exe",
+        "LdVBoxHeadless.exe",
+        "dnplayer.exe",
+        "Memu.exe",
+        "simulator.exe",
+    ];
+
+    // 已知的游戏窗口类名
+    const GAME_CLASS_NAMES: &[&str] = &[
+        "UnityWndClass",
+        "MuMuWndClass",
+    ];
+
+    // 排除的系统窗口类名
+    const SYSTEM_CLASS_NAMES: &[&str] = &[
+        "Progman",
+        "Shell_TrayWnd",
+        "WorkerW",
+        "IME",
+        "MSCTFIME UI",
+        "tooltips_class32",
+        "DwmWindowComposition",
+        "Windows.UI.Core.CoreWindow",
+    ];
+
+    // 排除的系统进程名
+    const SYSTEM_PROCESS_NAMES: &[&str] = &[
+        "explorer.exe",
+        "SearchHost.exe",
+        "ShellExperienceHost.exe",
+        "ApplicationFrameHost.exe",
+        "Taskmgr.exe",
+        "devenv.exe",
+        "code.exe",
+        "WindowsTerminal.exe",
+        "conhost.exe",
+    ];
+
+    // 排除系统窗口
+    if SYSTEM_CLASS_NAMES.iter().any(|&c| window.class_name == c) {
+        return false;
+    }
+    if SYSTEM_PROCESS_NAMES.iter().any(|&p| window.process_name.eq_ignore_ascii_case(p)) {
+        return false;
+    }
+
+    // 排除空标题窗口
+    if window.title.trim().is_empty() {
+        return false;
+    }
+
+    // 已知游戏窗口直接通过
+    if GAME_PROCESS_NAMES.iter().any(|&p| window.process_name.eq_ignore_ascii_case(p)) {
+        return true;
+    }
+    if GAME_CLASS_NAMES.iter().any(|&c| window.class_name == c) {
+        return true;
+    }
+
+    // 其他窗口：如果标题包含游戏相关关键词也通过
+    const GAME_TITLE_KEYWORDS: &[&str] = &[
+        "明日方舟",
+        "Arknights",
+        "arknights",
+        "MuMu",
+        "Nox",
+        "BlueStacks",
+        "LDPlayer",
+        "MEmu",
+    ];
+    GAME_TITLE_KEYWORDS.iter().any(|&k| window.title.contains(k))
+}
+
 impl CaptureCatalog {
     pub fn source_choices(&self, game_mode: GameMode) -> Vec<SourceChoice> {
         let mut sources = Vec::new();
 
-        for adb in &self.adb_devices {
-            sources.push(SourceChoice {
-                label: format!("ADB | {} | {}", adb.name, adb.address),
-                source: CaptureSource::Adb(adb.address.clone()),
-            });
-        }
-
-        for window in &self.windows {
-            sources.push(SourceChoice {
-                label: format!("窗口 | {} | {}", window.process_name, window.title),
-                source: CaptureSource::DesktopWindow(window.hwnd),
-            });
-        }
-
-        for monitor in &self.monitors {
-            sources.push(SourceChoice {
-                label: format!(
-                    "显示器 | #{} | {} ({}x{})",
-                    monitor.index, monitor.name, monitor.width, monitor.height
-                ),
-                source: CaptureSource::Monitor(monitor.index),
-            });
+        match game_mode {
+            GameMode::Emulator => {
+                // 模拟器模式：只显示ADB设备
+                for adb in &self.adb_devices {
+                    sources.push(SourceChoice {
+                        label: format!("ADB | {} | {}", adb.name, adb.address),
+                        source: CaptureSource::Adb(adb.address.clone()),
+                    });
+                }
+            }
+            GameMode::Pc => {
+                // PC模式：显示游戏相关窗口（过滤系统窗口）+ 显示器
+                for window in &self.windows {
+                    if is_game_window(window) {
+                        sources.push(SourceChoice {
+                            label: format!("窗口 | {} | {}", window.process_name, window.title),
+                            source: CaptureSource::DesktopWindow(window.hwnd),
+                        });
+                    }
+                }
+                for monitor in &self.monitors {
+                    sources.push(SourceChoice {
+                        label: format!(
+                            "显示器 | #{} | {} ({}x{})",
+                            monitor.index, monitor.name, monitor.width, monitor.height
+                        ),
+                        source: CaptureSource::Monitor(monitor.index),
+                    });
+                }
+            }
+            GameMode::WindowOnly => {
+                // 普通窗口模式：显示所有窗口 + 显示器
+                for window in &self.windows {
+                    sources.push(SourceChoice {
+                        label: format!("窗口 | {} | {}", window.process_name, window.title),
+                        source: CaptureSource::DesktopWindow(window.hwnd),
+                    });
+                }
+                for monitor in &self.monitors {
+                    sources.push(SourceChoice {
+                        label: format!(
+                            "显示器 | #{} | {} ({}x{})",
+                            monitor.index, monitor.name, monitor.width, monitor.height
+                        ),
+                        source: CaptureSource::Monitor(monitor.index),
+                    });
+                }
+            }
         }
 
         sources.sort_by_key(|choice| choice.priority(game_mode));

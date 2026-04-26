@@ -27,10 +27,10 @@ pub const COUNT_REGIONS_REL: [(f32, f32, f32, f32); 6] = [
 
 /// 战斗区域 ROI（相对比例，基于全屏坐标）
 const BATTLE_ROI_REL: RelativeRoi = RelativeRoi {
-    x: 0.2479,
-    y: 0.8410,
-    width: 0.5047,
-    height: 0.1100,
+    x: 0.2470,
+    y: 0.8425,
+    width: 0.5075,
+    height: 0.1112,
 };
 
 pub fn analyze_frame(
