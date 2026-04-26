@@ -133,7 +133,7 @@ impl CandlePredictor {
         let nh = 16; // 默认头数，与训练配置一致
 
         let model = crate::training::UnitAwareTransformer::new(vb, tfc, ed, nh, nl)?;
-        let output = model.forward(ls, lc, rs, rc)?;
+        let output = model.forward(ls, lc, rs, rc, 0.0, false)?;
         let prob = output.to_scalar::<f32>().map_err(se)?;
         let prob = if prob.is_nan() || prob.is_infinite() { 0.5f32 } else { prob.clamp(0.0, 1.0) };
         Ok(build_prediction_result(prob))
@@ -201,7 +201,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn empty_snapshot() -> BattleSnapshot {
-        BattleSnapshot { source: CaptureSource::Monitor(1), frame_size: (100, 100), roi: None, units: Vec::new(), terrain_features: Vec::new() }
+        BattleSnapshot { source: CaptureSource::Monitor(1), frame_size: (100, 100), roi: None, units: Vec::new(), terrain_features: Vec::new(), terrain_name: None }
     }
 
     #[test]

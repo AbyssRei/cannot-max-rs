@@ -193,6 +193,7 @@ mod tests {
                 },
             ],
             terrain_features: Vec::new(),
+            terrain_name: None,
         }
     }
 

@@ -113,18 +113,21 @@ impl FieldModel {
         Ok(Self { varmap, num_classes })
     }
 
-    /// 对单张 224x224 RGBA 图像进行分类
-    fn classify(&self, image: &RgbaImage) -> Result<usize, String> {
+    /// 对单张 224x224 RGBA 图像进行分类，返回 (类别索引, 置信度)
+    fn classify(&self, image: &RgbaImage) -> Result<(usize, f32), String> {
         let device = Device::Cpu;
         let vb = VarBuilder::from_varmap(&self.varmap, DType::F32, &device);
 
-        // 将 RGBA 图像转为 CHW 张量 [1, 3, 224, 224]，归一化到 [0, 1]
+        // 将 RGBA 图像转为 CHW 张量 [1, 3, 224, 224]，使用 ImageNet 标准归一化
+        let mean = [0.485f32, 0.456, 0.406];
+        let std = [0.229f32, 0.224, 0.225];
         let mut pixel_data = Vec::with_capacity(3 * 224 * 224);
         for c in 0..3usize {
             for y in 0..224usize {
                 for x in 0..224usize {
                     let pixel = image.get_pixel(x as u32, y as u32);
-                    pixel_data.push(pixel[c] as f32 / 255.0);
+                    let normalized = ((pixel[c] as f32 / 255.0) - mean[c]) / std[c];
+                    pixel_data.push(normalized);
                 }
             }
         }
@@ -133,16 +136,31 @@ impl FieldModel {
             .map_err(|e| e.to_string())?;
 
         // 使用 MobileNetV3 Small 架构进行前向推理
-        let output = mobilenetv3_small_forward(&input, vb, self.num_classes)?;
+        let logits = mobilenetv3_small_forward(&input, vb, self.num_classes)?;
+
+        // 计算 softmax 得到概率分布
+        let probs = candle_nn::ops::softmax(&logits, 1).map_err(|e| e.to_string())?;
 
         // 取 argmax 作为预测类别
-        let class_index = output
+        let class_index = probs
             .argmax(1)
             .map_err(|e| e.to_string())?
             .to_scalar::<u32>()
             .map_err(|e| e.to_string())? as usize;
 
-        Ok(class_index)
+        // 获取最高概率（置信度）
+        let max_prob = probs
+            .max(1)
+            .map_err(|e| e.to_string())?
+            .to_scalar::<f32>()
+            .map_err(|e| e.to_string())?;
+
+        // 若最高概率 < 0.5，返回 (0, 0.0) 表示"未知"地形
+        if max_prob < 0.5 {
+            Ok((0, 0.0))
+        } else {
+            Ok((class_index, max_prob))
+        }
     }
 }
 
@@ -502,7 +520,14 @@ impl FieldRecognizer {
 
         // 执行推理
         match model.classify(roi) {
-            Ok(class_index) => self.idx_to_class.get(&class_index).cloned(),
+            Ok((class_index, confidence)) => {
+                // 置信度为0表示"未知"地形
+                if confidence == 0.0 {
+                    None
+                } else {
+                    self.idx_to_class.get(&class_index).cloned()
+                }
+            }
             Err(e) => {
                 eprintln!("场地分类推理失败: {e}");
                 None

@@ -201,6 +201,9 @@ mod tests {
             visualization_enabled: false,
             roster_expanded: false,
             last_roster: None,
+            field_model_path: AppConfig::default_field_model_path(),
+            history_data_path: AppConfig::default_history_data_path(),
+            screenshots_dir: AppConfig::default_screenshots_dir(),
         }
     }
 

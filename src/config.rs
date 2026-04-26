@@ -72,6 +72,12 @@ pub struct AppConfig {
     pub roster_expanded: bool,
     #[serde(default)]
     pub last_roster: Option<Roster>,
+    #[serde(default = "AppConfig::default_field_model_path")]
+    pub field_model_path: PathBuf,
+    #[serde(default = "AppConfig::default_history_data_path")]
+    pub history_data_path: PathBuf,
+    #[serde(default = "AppConfig::default_screenshots_dir")]
+    pub screenshots_dir: PathBuf,
 }
 
 impl Default for AppConfig {
@@ -98,13 +104,16 @@ impl Default for AppConfig {
             visualization_enabled: false,
             roster_expanded: false,
             last_roster: None,
+            field_model_path: Self::default_field_model_path(),
+            history_data_path: Self::default_history_data_path(),
+            screenshots_dir: Self::default_screenshots_dir(),
         }
     }
 }
 
 impl AppConfig {
     pub const fn schema_version() -> u32 {
-        4
+        5
     }
 
     pub const fn default_monster_count() -> usize {
@@ -113,6 +122,18 @@ impl AppConfig {
 
     pub const fn default_field_feature_count() -> usize {
         0
+    }
+
+    pub fn default_field_model_path() -> PathBuf {
+        PathBuf::from("models/field_recognition.safetensors")
+    }
+
+    pub fn default_history_data_path() -> PathBuf {
+        PathBuf::from("data/history.csv")
+    }
+
+    pub fn default_screenshots_dir() -> PathBuf {
+        PathBuf::from("screenshots")
     }
 
     pub fn workspace_root() -> PathBuf {
@@ -197,6 +218,18 @@ impl AppConfig {
 
         if self.deepseek_cli_path.as_os_str().is_empty() {
             self.deepseek_cli_path = defaults.deepseek_cli_path;
+        }
+
+        if self.field_model_path.as_os_str().is_empty() {
+            self.field_model_path = defaults.field_model_path;
+        }
+
+        if self.history_data_path.as_os_str().is_empty() {
+            self.history_data_path = defaults.history_data_path;
+        }
+
+        if self.screenshots_dir.as_os_str().is_empty() {
+            self.screenshots_dir = defaults.screenshots_dir;
         }
 
         self

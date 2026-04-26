@@ -4,6 +4,132 @@ use std::path::Path;
 const MONSTER_COUNT: usize = 60;
 const FIELD_FEATURE_COUNT: usize = 0;
 
+// ── 5级匹配分类 ──
+
+/// 匹配分类优先级：ExactMatch > Proportional > PartialMatch > Different > Default
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MatchCategory {
+    ExactMatch,    // 怪物ID和数量完全一致
+    Proportional,  // 怪物ID一致，数量成比例
+    PartialMatch,  // 部分怪物ID一致
+    Different,     // 怪物ID大部分不同
+    Default,       // 无法比较（如空阵容）
+}
+
+impl MatchCategory {
+    /// 数值优先级，越小越优先
+    fn priority(self) -> u8 {
+        match self {
+            Self::ExactMatch => 0,
+            Self::Proportional => 1,
+            Self::PartialMatch => 2,
+            Self::Different => 3,
+            Self::Default => 4,
+        }
+    }
+}
+
+/// 根据当前阵容和历史阵容的怪物ID/数量比较确定匹配分类
+pub fn classify_match(
+    cur_left: &[f32],
+    cur_right: &[f32],
+    hist_left: &[f32],
+    hist_right: &[f32],
+) -> MatchCategory {
+    // 提取当前和历史阵容的怪物ID集合及数量
+    let cur_ids: std::collections::HashSet<usize> = (0..MONSTER_COUNT)
+        .filter(|&i| cur_left[i] > 0.0 || cur_right[i] > 0.0)
+        .collect();
+    let hist_ids: std::collections::HashSet<usize> = (0..MONSTER_COUNT)
+        .filter(|&i| hist_left[i] > 0.0 || hist_right[i] > 0.0)
+        .collect();
+
+    if cur_ids.is_empty() || hist_ids.is_empty() {
+        return MatchCategory::Default;
+    }
+
+    // 检查ID是否完全一致
+    let id_match = cur_ids == hist_ids;
+
+    if id_match {
+        // 检查数量是否完全一致
+        let count_exact = (0..MONSTER_COUNT).all(|i| {
+            (cur_left[i] - hist_left[i]).abs() < 1e-6 && (cur_right[i] - hist_right[i]).abs() < 1e-6
+        });
+        if count_exact {
+            return MatchCategory::ExactMatch;
+        }
+
+        // 检查数量是否成比例
+        let ratios: Vec<f32> = (0..MONSTER_COUNT)
+            .filter(|&i| cur_left[i] > 0.0 && hist_left[i] > 0.0)
+            .map(|i| cur_left[i] / hist_left[i])
+            .collect();
+        if !ratios.is_empty() {
+            let avg_ratio = ratios.iter().sum::<f32>() / ratios.len() as f32;
+            let all_proportional = (0..MONSTER_COUNT).all(|i| {
+                if cur_left[i] == 0.0 && hist_left[i] == 0.0 { return true; }
+                if cur_left[i] == 0.0 || hist_left[i] == 0.0 { return false; }
+                (cur_left[i] / hist_left[i] - avg_ratio).abs() < 0.1
+            }) && (0..MONSTER_COUNT).all(|i| {
+                if cur_right[i] == 0.0 && hist_right[i] == 0.0 { return true; }
+                if cur_right[i] == 0.0 || hist_right[i] == 0.0 { return false; }
+                (cur_right[i] / hist_right[i] - avg_ratio).abs() < 0.1
+            });
+            if all_proportional {
+                return MatchCategory::Proportional;
+            }
+        }
+
+        return MatchCategory::PartialMatch;
+    }
+
+    // 计算ID重叠率
+    let intersection = cur_ids.intersection(&hist_ids).count();
+    let union = cur_ids.union(&hist_ids).count();
+    let overlap_ratio = intersection as f32 / union as f32;
+
+    if overlap_ratio >= 0.5 {
+        MatchCategory::PartialMatch
+    } else {
+        MatchCategory::Different
+    }
+}
+
+// ── 中文地形名称映射 ──
+
+/// 场地索引到中文名称的映射
+pub const TERRAIN_NAMES: &[&str] = &[
+    "未知",         // 0
+    "祭坛",         // 1
+    "阻挡平行",     // 2
+    "阻挡垂直",     // 3
+    "线圈窄",       // 4
+    "线圈宽",       // 5
+    "弩箭上方",     // 6
+    "火焰左侧",     // 7
+    "火焰右侧",     // 8
+    "火焰上方",     // 9
+    "源石虫",       // 10
+    "高能源石虫",   // 11
+];
+
+/// 根据场地索引返回中文名称
+pub fn terrain_name(index: usize) -> String {
+    TERRAIN_NAMES.get(index).unwrap_or(&"未知").to_string()
+}
+
+// ── 匹配结果 ──
+
+/// 单条历史匹配结果
+#[derive(Debug, Clone)]
+pub struct MatchResult {
+    pub index: usize,
+    pub similarity: f32,
+    pub category: MatchCategory,
+    pub terrain_name: String,
+}
+
 pub struct HistoryMatch {
     past_left: Array2<f32>,
     past_right: Array2<f32>,
@@ -176,11 +302,29 @@ impl HistoryMatch {
             .map(|(((&mb, &ma), &cb), &ca)| mb < ma || (mb == ma && cb < ca))
             .collect();
 
-        // Sort by similarity (descending)
-        let mut indices: Vec<usize> = (0..self.n_history).collect();
-        indices.sort_by(|&a, &b| sims[b].partial_cmp(&sims[a]).unwrap_or(std::cmp::Ordering::Equal));
+        // 计算每条匹配的MatchCategory
+        let mut match_results: Vec<MatchResult> = (0..self.n_history).map(|i| {
+            let hist_left: Vec<f32> = self.past_left.row(i).to_vec();
+            let hist_right: Vec<f32> = self.past_right.row(i).to_vec();
+            let category = classify_match(left_counts, right_counts, &hist_left, &hist_right);
+            MatchResult {
+                index: i,
+                similarity: sims[i],
+                category,
+                terrain_name: String::new(),
+            }
+        }).collect();
 
-        let top20: Vec<usize> = indices.into_iter().take(20).collect();
+        // 排序：先按MatchCategory优先级，再按余弦相似度降序
+        match_results.sort_by(|a, b| {
+            let cat_cmp = a.category.priority().cmp(&b.category.priority());
+            if cat_cmp != std::cmp::Ordering::Equal {
+                return cat_cmp;
+            }
+            b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let top20: Vec<usize> = match_results.iter().take(20).map(|r| r.index).collect();
 
         // Compute win rates from top 5
         let top5 = &top20[..5.min(top20.len())];

@@ -185,6 +185,7 @@ pub struct BattleSnapshot {
     pub roi: Option<Roi>,
     pub units: Vec<RecognizedUnit>,
     pub terrain_features: Vec<f32>,
+    pub terrain_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -271,6 +272,30 @@ pub struct AnalysisOutput {
 
 // ── 训练相关类型 ──
 
+/// 学习率调度器
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LrScheduler {
+    Fixed,
+    CosineAnnealing { t_max: usize, eta_min: f64 },
+}
+
+impl Default for LrScheduler {
+    fn default() -> Self {
+        Self::Fixed
+    }
+}
+
+impl fmt::Display for LrScheduler {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fixed => f.write_str("固定"),
+            Self::CosineAnnealing { t_max, eta_min } => {
+                write!(f, "余弦退火(T={}, η_min={})", t_max, eta_min)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainConfig {
     pub data_file: PathBuf,
@@ -285,6 +310,9 @@ pub struct TrainConfig {
     pub save_dir: PathBuf,
     pub max_feature_value: f32,
     pub weight_decay: f64,
+    pub dropout: f32,
+    pub lr_scheduler: LrScheduler,
+    pub gradient_clip_norm: f64,
 }
 
 impl Default for TrainConfig {
@@ -302,6 +330,9 @@ impl Default for TrainConfig {
             save_dir: PathBuf::from("models"),
             max_feature_value: 100.0,
             weight_decay: 1e-1,
+            dropout: 0.2,
+            lr_scheduler: LrScheduler::default(),
+            gradient_clip_norm: 1.0,
         }
     }
 }
@@ -344,6 +375,7 @@ pub struct AutoFetchStats {
     pub total_fill_count: u32,
     pub incorrect_fill_count: u32,
     pub elapsed_secs: f64,
+    pub data_saved_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,6 +492,7 @@ pub struct RosterPanelState {
     pub expanded: bool,
     pub monster_picker_open: bool,
     pub picker_target: Option<(Side, usize)>,
+    pub monster_filter: String,
 }
 
 impl Default for RosterPanelState {
@@ -470,6 +503,7 @@ impl Default for RosterPanelState {
             expanded: false,
             monster_picker_open: false,
             picker_target: None,
+            monster_filter: String::new(),
         }
     }
 }

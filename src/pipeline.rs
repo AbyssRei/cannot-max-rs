@@ -1,6 +1,7 @@
 use crate::capture::capture_frame;
 use crate::config::AppConfig;
 use crate::core::{AnalysisOutput, BattleSnapshot, CaptureCatalog, CaptureSource, CapturedFrame, Side};
+use crate::field_recognition::FieldRecognizer;
 use crate::history_match::HistoryMatch;
 use crate::prediction::{CandlePredictor, Predictor};
 use crate::recognition::analyze_frame;
@@ -31,7 +32,37 @@ impl AnalysisPipeline {
     ) -> Result<AnalysisOutput, String> {
         let resources = ResourceStore::load(config)?;
         let frame = capture_frame(source, config, catalog)?;
-        let snapshot = analyze_frame(source, &frame, config.roi, &resources, config);
+        let mut snapshot = analyze_frame(source, &frame, config.roi, &resources, config);
+
+        // 场地识别：如果配置了场地特征数，调用FieldRecognizer识别场地元素
+        if config.field_feature_count > 0 {
+            let field_recognizer = FieldRecognizer::new(&config.field_model_path);
+            if field_recognizer.is_ready() {
+                let field_data = field_recognizer.recognize_field_elements(&frame.image);
+                let feature_columns = field_recognizer.get_feature_columns();
+                let mut terrain_features = vec![0.0f32; config.field_feature_count];
+                for (i, col) in feature_columns.iter().enumerate() {
+                    if i >= config.field_feature_count { break; }
+                    if let Some(&val) = field_data.get(col) {
+                        terrain_features[i] = val;
+                    }
+                }
+                snapshot.terrain_features = terrain_features;
+                // 根据场地特征推断地形名称
+                if !field_data.is_empty() {
+                    let detected: Vec<&str> = field_data.iter()
+                        .filter(|(_, v)| **v > 0.0)
+                        .map(|(k, _)| k.as_str())
+                        .collect();
+                    snapshot.terrain_name = if detected.is_empty() {
+                        None
+                    } else {
+                        Some(detected.join("+"))
+                    };
+                }
+            }
+        }
+
         let predictor = CandlePredictor::new(self.model_path.clone());
         let prediction = predictor.predict(&snapshot)?;
 

@@ -4,6 +4,18 @@ use candle_nn::{AdamW, Linear, Module, Optimizer, VarBuilder, VarMap};
 use std::fs;
 use std::path::Path;
 
+// ── Dropout 工具函数 ──
+
+/// 在训练时应用 Dropout，推理时直接返回输入
+fn apply_dropout(x: &Tensor, dropout: f32, train: bool) -> Result<Tensor, String> {
+    if !train || dropout <= 0.0 {
+        return Ok(x.clone());
+    }
+    // 使用 candle_nn::Dropout
+    let d = candle_nn::Dropout::new(dropout);
+    d.forward(x, train).map_err(|e| e.to_string())
+}
+
 const DEFAULT_MONSTER_COUNT: usize = 60;
 const DEFAULT_FIELD_FEATURE_COUNT: usize = 0;
 const TOPK: usize = 8;
@@ -63,13 +75,40 @@ pub fn load_training_data(
     }
 
     if all_samples.is_empty() { return Err("训练数据为空".to_string()); }
-    let val_size = (all_samples.len() as f32 * config.test_size) as usize;
-    let val_size = val_size.max(1).min(all_samples.len() - 1);
+
+    // 分层随机划分：按胜负标签分组，每组内随机shuffle后按比例划分
+    let mut win_samples: Vec<TrainSample> = Vec::new();
+    let mut lose_samples: Vec<TrainSample> = Vec::new();
+    for sample in all_samples {
+        if sample.label > 0.5 {
+            win_samples.push(sample);
+        } else {
+            lose_samples.push(sample);
+        }
+    }
+
     let mut rng = rand::rng();
     use rand::seq::SliceRandom;
-    all_samples.shuffle(&mut rng);
-    let val_samples = all_samples.split_off(all_samples.len() - val_size);
-    Ok((all_samples, val_samples))
+    win_samples.shuffle(&mut rng);
+    lose_samples.shuffle(&mut rng);
+
+    let win_val_size = (win_samples.len() as f32 * config.test_size) as usize;
+    let lose_val_size = (lose_samples.len() as f32 * config.test_size) as usize;
+    let win_val_size = win_val_size.max(1).min(win_samples.len().saturating_sub(1));
+    let lose_val_size = lose_val_size.max(1).min(lose_samples.len().saturating_sub(1));
+
+    let win_val = win_samples.split_off(win_samples.len() - win_val_size);
+    let lose_val = lose_samples.split_off(lose_samples.len() - lose_val_size);
+
+    let mut train_samples = win_samples;
+    train_samples.extend(lose_samples);
+    let mut val_samples = win_val;
+    val_samples.extend(lose_val);
+
+    // 整体shuffle训练集
+    train_samples.shuffle(&mut rng);
+
+    Ok((train_samples, val_samples))
 }
 
 pub fn select_device(prefer_cuda: bool) -> Result<Device, String> {
@@ -145,24 +184,36 @@ impl TransformerLayer {
         d.broadcast_mul(&is_).map_err(se)?.broadcast_mul(&self.nw).map_err(se)?.broadcast_add(&self.nb).map_err(se)
     }
 
-    fn fwd(&self, lf:&Tensor, rf:&Tensor) -> Result<(Tensor,Tensor), String> {
+    fn fwd(&self, lf:&Tensor, rf:&Tensor, dropout: f32, train: bool) -> Result<(Tensor,Tensor), String> {
         let (nh,ed) = (self.nh, self.ed);
         // 敌方交叉注意力
         let dl = Self::mha(&self.eq,&self.ek,&self.ev,&self.eo, lf,rf,rf, nh,ed)?;
         let dr = Self::mha(&self.eq,&self.ek,&self.ev,&self.eo, rf,lf,lf, nh,ed)?;
+        let dl = apply_dropout(&dl, dropout, train)?;
+        let dr = apply_dropout(&dr, dropout, train)?;
         let lf = lf.add(&dl).map_err(se)?;
         let rf = rf.add(&dr).map_err(se)?;
         // 敌方 FFN
-        let lf = lf.add(&Self::ffn(&self.ef1,&self.ef2,&lf)?).map_err(se)?;
-        let rf = rf.add(&Self::ffn(&self.ef1,&self.ef2,&rf)?).map_err(se)?;
+        let lf_ffn = Self::ffn(&self.ef1,&self.ef2,&lf)?;
+        let lf_ffn = apply_dropout(&lf_ffn, dropout, train)?;
+        let rf_ffn = Self::ffn(&self.ef1,&self.ef2,&rf)?;
+        let rf_ffn = apply_dropout(&rf_ffn, dropout, train)?;
+        let lf = lf.add(&lf_ffn).map_err(se)?;
+        let rf = rf.add(&rf_ffn).map_err(se)?;
         // 友方自注意力
         let dl = Self::mha(&self.fq,&self.fk,&self.fv,&self.fo, &lf,&lf,&lf, nh,ed)?;
         let dr = Self::mha(&self.fq,&self.fk,&self.fv,&self.fo, &rf,&rf,&rf, nh,ed)?;
+        let dl = apply_dropout(&dl, dropout, train)?;
+        let dr = apply_dropout(&dr, dropout, train)?;
         let lf = lf.add(&dl).map_err(se)?;
         let rf = rf.add(&dr).map_err(se)?;
         // 友方 FFN
-        let lf = lf.add(&Self::ffn(&self.ff1,&self.ff2,&lf)?).map_err(se)?;
-        let rf = rf.add(&Self::ffn(&self.ff1,&self.ff2,&rf)?).map_err(se)?;
+        let lf_ffn = Self::ffn(&self.ff1,&self.ff2,&lf)?;
+        let lf_ffn = apply_dropout(&lf_ffn, dropout, train)?;
+        let rf_ffn = Self::ffn(&self.ff1,&self.ff2,&rf)?;
+        let rf_ffn = apply_dropout(&rf_ffn, dropout, train)?;
+        let lf = lf.add(&lf_ffn).map_err(se)?;
+        let rf = rf.add(&rf_ffn).map_err(se)?;
         // LayerNorm
         Ok((self.ln(&lf)?, self.ln(&rf)?))
     }
@@ -186,7 +237,7 @@ impl UnitAwareTransformer {
         Ok(Self { uew, vf1, vf2, layers, fc1, fc2, nu, ed, nh })
     }
 
-    pub fn forward(&self, _ls:&Tensor, lc:&Tensor, _rs:&Tensor, rc:&Tensor) -> Result<Tensor, String> {
+    pub fn forward(&self, _ls:&Tensor, lc:&Tensor, _rs:&Tensor, rc:&Tensor, dropout: f32, train: bool) -> Result<Tensor, String> {
         let (b, fd) = lc.dims2().map_err(se)?;
         let k = TOPK.min(fd);
         let ed = self.ed;
@@ -227,7 +278,7 @@ impl UnitAwareTransformer {
 
         // Transformer 层
         for layer in &self.layers {
-            let (nl, nr) = layer.fwd(&lf, &rf)?;
+            let (nl, nr) = layer.fwd(&lf, &rf, dropout, train)?;
             lf = nl; rf = nr;
         }
 
@@ -287,7 +338,19 @@ impl TrainingPipeline {
         let t0 = std::time::Instant::now();
 
         for epoch in 0..cfg.epochs {
-            let (train_loss, train_acc) = train_epoch(&model, &train, &device, &mut opt, cfg.batch_size, tfc)?;
+            // 学习率调度：根据 lr_scheduler 更新学习率
+            let new_lr = match &cfg.lr_scheduler {
+                crate::core::LrScheduler::Fixed => cfg.learning_rate,
+                crate::core::LrScheduler::CosineAnnealing { t_max, eta_min } => {
+                    let t_max = *t_max as f64;
+                    let eta_min = *eta_min;
+                    let base_lr = cfg.learning_rate;
+                    eta_min + (base_lr - eta_min) * (1.0 + (std::f64::consts::PI * epoch as f64 / t_max).cos()) / 2.0
+                }
+            };
+            opt.set_learning_rate(new_lr);
+
+            let (train_loss, train_acc) = train_epoch(&model, &train, &device, &mut opt, cfg.batch_size, tfc, cfg.dropout, &varmap.all_vars(), cfg.gradient_clip_norm)?;
             let (val_loss, val_acc) = eval(&model, &val, &device, cfg.batch_size, tfc)?;
 
             let sd = Path::new(&cfg.save_dir);
@@ -327,6 +390,9 @@ fn train_epoch(
     optimizer: &mut AdamW,
     batch_size: usize,
     total_feature_count: usize,
+    dropout: f32,
+    train_vars: &[candle_core::Var],
+    max_grad_norm: f64,
 ) -> Result<(f32, f32), String> {
     let mut total_loss = 0.0f32;
     let mut correct_count = 0usize;
@@ -347,11 +413,17 @@ fn train_epoch(
         let labels: Vec<f32> = batch.iter().map(|sample| sample.label).collect();
         let labels_tensor = Tensor::from_vec(labels, (actual_batch_size,), device).map_err(se)?;
 
-        let output = model.forward(&left_signs, &left_counts, &right_signs, &right_counts)?;
+        let output = model.forward(&left_signs, &left_counts, &right_signs, &right_counts, dropout, true)?;
         let diff = output.sub(&labels_tensor).map_err(se)?;
         let loss = diff.sqr().map_err(se)?.mean_all().map_err(se)?;
 
-        optimizer.backward_step(&loss).map_err(|e| e.to_string())?;
+        // 反向传播
+        let mut grads = loss.backward().map_err(|e| e.to_string())?;
+
+        // 梯度裁剪
+        clip_grad_norm_(&mut grads, train_vars, max_grad_norm);
+
+        optimizer.step(&grads).map_err(|e| e.to_string())?;
 
         total_loss += loss.to_scalar::<f32>().map_err(se)?;
 
@@ -369,6 +441,38 @@ fn train_epoch(
     let avg_loss = total_loss / num_batches.max(1) as f32;
     let accuracy = 100.0 * correct_count as f32 / total_count.max(1) as f32;
     Ok((avg_loss, accuracy))
+}
+
+/// 梯度裁剪：计算所有参数梯度的L2范数，若超过max_norm则按比例缩放
+fn clip_grad_norm_(
+    grads: &mut candle_core::backprop::GradStore,
+    vars: &[candle_core::Var],
+    max_norm: f64,
+) {
+    // 计算所有参数梯度的L2范数
+    let mut total_norm_sq = 0.0f64;
+    for var in vars {
+        let tensor = var.as_tensor();
+        if let Some(grad) = grads.get(tensor) {
+            if let Ok(norm_sq) = grad.sqr().and_then(|s| s.sum_all()).and_then(|s| s.to_scalar::<f32>()) {
+                total_norm_sq += norm_sq as f64;
+            }
+        }
+    }
+    let total_norm = total_norm_sq.sqrt();
+
+    // 若范数超过max_norm，按比例缩放所有梯度
+    if total_norm > max_norm && total_norm > 0.0 {
+        let scale = max_norm / total_norm;
+        for var in vars {
+            let tensor = var.as_tensor();
+            if let Some(grad) = grads.get(tensor).cloned() {
+                if let Ok(scaled) = grad.affine(scale as f64, 0.0) {
+                    grads.insert(tensor, scaled);
+                }
+            }
+        }
+    }
 }
 
 fn eval(
@@ -397,7 +501,7 @@ fn eval(
         let labels: Vec<f32> = batch.iter().map(|sample| sample.label).collect();
         let labels_tensor = Tensor::from_vec(labels, (actual_batch_size,), device).map_err(se)?;
 
-        let output = model.forward(&left_signs, &left_counts, &right_signs, &right_counts)?;
+        let output = model.forward(&left_signs, &left_counts, &right_signs, &right_counts, 0.0, false)?;
         let diff = output.sub(&labels_tensor).map_err(se)?;
         let loss = diff.sqr().map_err(se)?.mean_all().map_err(se)?;
 

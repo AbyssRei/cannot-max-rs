@@ -33,6 +33,7 @@ fn baseline_predictor_works() {
         roi: None,
         units: Vec::new(),
         terrain_features: Vec::new(),
+        terrain_name: None,
     };
     let result = predictor.predict(&snapshot).unwrap();
     assert!((result.left_win_rate + result.right_win_rate - 1.0).abs() < 0.001);
@@ -49,6 +50,7 @@ fn candle_predictor_falls_back_to_baseline() {
         roi: None,
         units: Vec::new(),
         terrain_features: Vec::new(),
+        terrain_name: None,
     };
     let result = predictor.predict(&snapshot).unwrap();
     assert!((result.left_win_rate + result.right_win_rate - 1.0).abs() < 0.001);

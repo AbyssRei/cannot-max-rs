@@ -1,10 +1,11 @@
 use crate::capture::capture_frame;
 use crate::config::AppConfig;
-use crate::core::{AutoFetchStats, CaptureCatalog, CaptureSource, CapturedFrame, GameState, Side};
+use crate::core::{AutoFetchStats, BattleSnapshot, CaptureCatalog, CaptureSource, CapturedFrame, GameState, Side};
 use crate::maa_controller::MaaControllerSession;
 use crate::prediction::{CandlePredictor, Predictor};
 use crate::recognition::analyze_frame;
 use crate::resources::ResourceStore;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -107,11 +108,13 @@ fn auto_fetch_loop(
 
     let mut total_fill_count = 0u32;
     let mut incorrect_fill_count = 0u32;
+    let mut data_saved_count = 0u32;
     let mut current_prediction = 0.5f32;
     let mut current_state = GameState::Unknown;
     let mut last_frame_size = (1920u32, 1080u32);
     let mut consecutive_empty_frames: u32 = 0;
     let mut settlement_check_count: u32 = 0;
+    let mut last_snapshot: Option<BattleSnapshot> = None;
 
     while running.load(Ordering::Relaxed) {
         // Check duration limit
@@ -127,6 +130,7 @@ fn auto_fetch_loop(
         update_stats(&stats, |s| {
             s.total_fill_count = total_fill_count;
             s.incorrect_fill_count = incorrect_fill_count;
+            s.data_saved_count = data_saved_count;
             s.elapsed_secs = elapsed;
         });
 
@@ -208,6 +212,7 @@ fn auto_fetch_loop(
             }
             GameState::PreBattle => {
                 // 战前：执行识别并预测
+                last_snapshot = Some(snapshot.clone());
                 if let Ok(prediction) = predictor.predict(&snapshot) {
                     current_prediction = prediction.right_win_rate;
                 }
@@ -239,6 +244,18 @@ fn auto_fetch_loop(
                     } else if result == Side::Right && current_prediction <= 0.5 {
                         incorrect_fill_count += 1;
                     }
+
+                    // 保存结算前截图
+                    let screenshots_dir = std::path::PathBuf::from(&config.screenshots_dir);
+                    let _ = save_screenshot(&screenshots_dir, &frame.image, total_fill_count);
+
+                    // 写入对局数据到CSV
+                    if let Some(ref snap) = last_snapshot {
+                        let csv_path = std::path::PathBuf::from(&config.history_data_path);
+                        if append_battle_data(&csv_path, snap, result, &snap.terrain_name, config.monster_count).is_ok() {
+                            data_saved_count += 1;
+                        }
+                    }
                 }
                 // 点击返回
                 click_relative(&source, &catalog, &config, RELATIVE_POINTS[0], last_frame_size);
@@ -264,6 +281,7 @@ fn auto_fetch_loop(
     update_stats(&stats, |s| {
         s.total_fill_count = total_fill_count;
         s.incorrect_fill_count = incorrect_fill_count;
+        s.data_saved_count = data_saved_count;
         s.elapsed_secs = elapsed;
     });
 }
@@ -326,4 +344,99 @@ fn get_saturation(pixel: image::Rgba<u8>) -> f32 {
     } else {
         0.0
     }
+}
+
+/// 将对局数据追加写入CSV文件（与Python版本格式兼容）
+pub fn append_battle_data(
+    csv_path: &Path,
+    snapshot: &BattleSnapshot,
+    result: Side,
+    terrain_name: &Option<String>,
+    monster_count: usize,
+) -> Result<(), String> {
+    if let Some(parent) = csv_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    // 构建左右方signs和counts向量
+    let mut left_signs = vec![0.0f32; monster_count];
+    let mut left_counts = vec![0.0f32; monster_count];
+    let mut right_signs = vec![0.0f32; monster_count];
+    let mut right_counts = vec![0.0f32; monster_count];
+
+    for unit in &snapshot.units {
+        let id: usize = unit.unit_id.parse().unwrap_or(0);
+        if id == 0 || id > monster_count {
+            continue;
+        }
+        let idx = id - 1;
+        match unit.side {
+            Side::Left => {
+                left_signs[idx] = 1.0;
+                left_counts[idx] = unit.count as f32;
+            }
+            Side::Right => {
+                right_signs[idx] = 1.0;
+                right_counts[idx] = unit.count as f32;
+            }
+        }
+    }
+
+    // label: 左方胜=0, 右方胜=1
+    let label = if result == Side::Right { 1.0 } else { 0.0 };
+
+    // 格式化signs和counts为逗号分隔字符串
+    let left_signs_str: String = left_signs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+    let left_counts_str: String = left_counts.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+    let right_signs_str: String = right_signs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+    let right_counts_str: String = right_counts.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+    let terrain_str: String = terrain_name.as_deref().unwrap_or("").to_string();
+
+    let line = format!(
+        "{},{},{},{},{},{}\n",
+        left_signs_str, left_counts_str, right_signs_str, right_counts_str, label, terrain_str
+    );
+
+    // 检查文件是否存在以决定是否写入表头
+    let write_header = !csv_path.exists();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(csv_path)
+        .map_err(|e| e.to_string())?;
+
+    if write_header {
+        use std::io::Write;
+        let header = format!(
+            "left_signs,left_counts,right_signs,right_counts,label,terrain\n"
+        );
+        file.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
+    }
+
+    use std::io::Write;
+    file.write_all(line.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// 保存结算前截图
+pub fn save_screenshot(
+    dir: &Path,
+    frame: &image::RgbaImage,
+    battle_id: u32,
+) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+
+    let timestamp = chrono_timestamp();
+    let filename = format!("battle_{}_{}.png", battle_id, timestamp);
+    let path = dir.join(&filename);
+
+    frame.save(&path).map_err(|e| e.to_string())?;
+
+    Ok(path)
+}
+
+/// 简易时间戳（无chrono依赖）
+fn chrono_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    format!("{}", duration.as_secs())
 }

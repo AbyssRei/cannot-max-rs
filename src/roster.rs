@@ -139,6 +139,7 @@ impl RosterManager {
             roi,
             units,
             terrain_features: Vec::new(),
+            terrain_name: None,
         }
     }
 

@@ -3,7 +3,7 @@ use crate::auto_fetch::AutoFetch;
 use crate::capture::{discover_sources, is_16by9};
 use crate::config::{AppConfig, Win32InputMethodConfig};
 use crate::core::{
-    AnalysisOutput, CaptureCatalog, CaptureSource, GameMode, ModelSelection, PredictionResult,
+    AnalysisOutput, CaptureCatalog, CaptureSource, GameMode, LrScheduler, ModelSelection, PredictionResult,
     RosterPanelState, RosterSource, Side, SourceChoice, TrainConfig, TrainProgress, TrainResult,
     UiMode,
 };
@@ -18,6 +18,7 @@ use crate::training::TrainingPipeline;
 use crate::visualization::VisualizationRenderer;
 use iced::widget::{
     button, checkbox, column, container, image, pick_list, row, scrollable, text, text_input,
+    Space,
 };
 use iced::{Alignment, Element, Length, Task, Theme};
 
@@ -99,6 +100,31 @@ pub enum Message {
     RoiDragStart((f32, f32)),
     RoiDragging((f32, f32)),
     RoiDragEnd,
+    // ── 新增：训练高级配置 ──
+    TrainDropoutChanged(String),
+    TrainLrSchedulerSelected(LrScheduler),
+    TrainGradientClipNormChanged(String),
+    // ── 新增：路径浏览按钮 ──
+    OpenModelPathDialog,
+    ModelPathPicked(Option<std::path::PathBuf>),
+    OpenMaaLibraryDialog,
+    MaaLibraryPicked(Option<std::path::PathBuf>),
+    OpenOcrModelDialog,
+    OcrModelPicked(Option<std::path::PathBuf>),
+    OpenDeepseekCliDialog,
+    DeepseekCliPicked(Option<std::path::PathBuf>),
+    OpenFieldModelDialog,
+    FieldModelPicked(Option<std::path::PathBuf>),
+    OpenHistoryDataDialog,
+    HistoryDataPicked(Option<std::path::PathBuf>),
+    OpenScreenshotsDirDialog,
+    ScreenshotsDirPicked(Option<std::path::PathBuf>),
+    // ── 新增：路径文本输入 ──
+    FieldModelPathChanged(String),
+    HistoryDataPathChanged(String),
+    ScreenshotsDirChanged(String),
+    // ── 新增：怪物选择弹窗搜索 ──
+    MonsterFilterChanged(String),
 }
 
 /// ROI 拖拽状态
@@ -162,6 +188,13 @@ pub struct CannotMaxApp {
     visualization_enabled: bool,
     visualization_overlay: Option<crate::core::VisualizationOverlay>,
     roi_dragging: Option<RoiDragState>,
+    // ── 新增：训练高级配置 ──
+    train_dropout_text: String,
+    train_gradient_clip_norm_text: String,
+    // ── 新增：路径字段 ──
+    field_model_path_text: String,
+    history_data_path_text: String,
+    screenshots_dir_text: String,
 }
 
 impl CannotMaxApp {
@@ -196,6 +229,7 @@ impl CannotMaxApp {
             expanded: config.roster_expanded,
             monster_picker_open: false,
             picker_target: None,
+            monster_filter: String::new(),
         };
 
         Self {
@@ -252,6 +286,13 @@ impl CannotMaxApp {
             visualization_enabled: config.visualization_enabled,
             visualization_overlay: None,
             roi_dragging: None,
+            // 新增：训练高级配置
+            train_dropout_text: format!("{:.2}", tc.dropout),
+            train_gradient_clip_norm_text: format!("{:.2}", tc.gradient_clip_norm),
+            // 新增：路径字段
+            field_model_path_text: config.field_model_path.display().to_string(),
+            history_data_path_text: config.history_data_path.display().to_string(),
+            screenshots_dir_text: config.screenshots_dir.display().to_string(),
         }
     }
 
@@ -282,6 +323,9 @@ impl CannotMaxApp {
             save_dir: "models".into(),
             max_feature_value: self.train_max_feature_value_text.parse().unwrap_or(100.0),
             weight_decay: 1e-1,
+            dropout: self.train_dropout_text.parse().unwrap_or(0.2),
+            lr_scheduler: self.config.train_config.lr_scheduler.clone(),
+            gradient_clip_norm: self.train_gradient_clip_norm_text.parse().unwrap_or(1.0),
         }
     }
 
@@ -298,6 +342,9 @@ impl CannotMaxApp {
         self.config.visualization_enabled = self.visualization_enabled;
         self.config.roster_expanded = self.roster_manager.panel.expanded;
         self.config.last_roster = Some(self.roster_manager.panel.roster.clone());
+        self.config.field_model_path = self.field_model_path_text.clone().into();
+        self.config.history_data_path = self.history_data_path_text.clone().into();
+        self.config.screenshots_dir = self.screenshots_dir_text.clone().into();
         self.status = match self.config.save() {
             Ok(()) => "配置已保存".to_string(),
             Err(error) => format!("配置保存失败: {error}"),
@@ -892,6 +939,12 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
         }
         // ── 新增：界面模式 ──
         Message::UiModeChanged(mode) => {
+            // 切换模式时若自动获取运行中先停止
+            if app.auto_fetch_running {
+                let _ = app.auto_fetch.stop();
+                app.auto_fetch_running = false;
+                app.status = "自动获取已停止（模式切换）".to_string();
+            }
             app.ui_mode = mode;
             app.config.ui_mode = mode;
             let _ = app.config.save();
@@ -1064,6 +1117,176 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        // ── 新增：训练高级配置 ──
+        Message::TrainDropoutChanged(value) => {
+            app.train_dropout_text = value;
+            Task::none()
+        }
+        Message::TrainLrSchedulerSelected(scheduler) => {
+            app.config.train_config.lr_scheduler = scheduler;
+            let _ = app.config.save();
+            Task::none()
+        }
+        Message::TrainGradientClipNormChanged(value) => {
+            app.train_gradient_clip_norm_text = value;
+            Task::none()
+        }
+        // ── 新增：路径浏览按钮 ──
+        Message::OpenModelPathDialog => {
+            Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .add_filter("safetensors", &["safetensors"])
+                        .pick_file()
+                        .await;
+                    file.map(|f| f.path().to_path_buf())
+                },
+                Message::ModelPathPicked,
+            )
+        }
+        Message::ModelPathPicked(path) => {
+            if let Some(path) = path {
+                let workspace_root = AppConfig::workspace_root();
+                let normalized = normalize_path(&path, &workspace_root);
+                app.config.model_path = normalized.stored.clone();
+                app.model_path_text = normalized.display.display().to_string();
+                app.model_loaded = path.exists();
+                let _ = app.config.save();
+            }
+            Task::none()
+        }
+        Message::OpenMaaLibraryDialog => {
+            Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .add_filter("动态库", &["dll", "so", "dylib"])
+                        .pick_file()
+                        .await;
+                    file.map(|f| f.path().to_path_buf())
+                },
+                Message::MaaLibraryPicked,
+            )
+        }
+        Message::MaaLibraryPicked(path) => {
+            if let Some(path) = path {
+                app.config.maa_library_path = path.clone();
+                app.maa_library_path_text = path.display().to_string();
+                let _ = app.config.save();
+            }
+            Task::none()
+        }
+        Message::OpenOcrModelDialog => {
+            Task::perform(
+                async {
+                    let folder = rfd::AsyncFileDialog::new().pick_folder().await;
+                    folder.map(|f| f.path().to_path_buf())
+                },
+                Message::OcrModelPicked,
+            )
+        }
+        Message::OcrModelPicked(path) => {
+            if let Some(path) = path {
+                app.config.ocr_model_path = path.clone();
+                app.ocr_model_path_text = path.display().to_string();
+                let _ = app.config.save();
+            }
+            Task::none()
+        }
+        Message::OpenDeepseekCliDialog => {
+            Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .add_filter("可执行文件", &["exe"])
+                        .pick_file()
+                        .await;
+                    file.map(|f| f.path().to_path_buf())
+                },
+                Message::DeepseekCliPicked,
+            )
+        }
+        Message::DeepseekCliPicked(path) => {
+            if let Some(path) = path {
+                app.config.deepseek_cli_path = path.clone();
+                app.deepseek_cli_path_text = path.display().to_string();
+                let _ = app.config.save();
+            }
+            Task::none()
+        }
+        Message::OpenFieldModelDialog => {
+            Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .add_filter("safetensors", &["safetensors"])
+                        .pick_file()
+                        .await;
+                    file.map(|f| f.path().to_path_buf())
+                },
+                Message::FieldModelPicked,
+            )
+        }
+        Message::FieldModelPicked(path) => {
+            if let Some(path) = path {
+                app.config.field_model_path = path.clone();
+                app.field_model_path_text = path.display().to_string();
+                let _ = app.config.save();
+            }
+            Task::none()
+        }
+        Message::OpenHistoryDataDialog => {
+            Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .add_filter("CSV", &["csv"])
+                        .pick_file()
+                        .await;
+                    file.map(|f| f.path().to_path_buf())
+                },
+                Message::HistoryDataPicked,
+            )
+        }
+        Message::HistoryDataPicked(path) => {
+            if let Some(path) = path {
+                app.config.history_data_path = path.clone();
+                app.history_data_path_text = path.display().to_string();
+                let _ = app.config.save();
+            }
+            Task::none()
+        }
+        Message::OpenScreenshotsDirDialog => {
+            Task::perform(
+                async {
+                    let folder = rfd::AsyncFileDialog::new().pick_folder().await;
+                    folder.map(|f| f.path().to_path_buf())
+                },
+                Message::ScreenshotsDirPicked,
+            )
+        }
+        Message::ScreenshotsDirPicked(path) => {
+            if let Some(path) = path {
+                app.config.screenshots_dir = path.clone();
+                app.screenshots_dir_text = path.display().to_string();
+                let _ = app.config.save();
+            }
+            Task::none()
+        }
+        // ── 新增：路径文本输入 ──
+        Message::FieldModelPathChanged(value) => {
+            app.field_model_path_text = value;
+            Task::none()
+        }
+        Message::HistoryDataPathChanged(value) => {
+            app.history_data_path_text = value;
+            Task::none()
+        }
+        Message::ScreenshotsDirChanged(value) => {
+            app.screenshots_dir_text = value;
+            Task::none()
+        }
+        // ── 新增：怪物选择弹窗搜索 ──
+        Message::MonsterFilterChanged(value) => {
+            app.roster_manager.panel.monster_filter = value;
+            Task::none()
+        }
     }
 }
 
@@ -1140,12 +1363,13 @@ fn view_normal_mode(app: &CannotMaxApp) -> Element<'_, Message> {
     ]
     .spacing(12);
 
-    // 模型下拉选择
-    let model_options: Vec<ModelSelection> = app
+    // 模型下拉选择（含"选择其他模型…"）
+    let mut model_options: Vec<ModelSelection> = app
         .available_models
         .iter()
         .map(|entry| ModelSelection::Scanned(entry.clone()))
         .collect();
+    model_options.push(ModelSelection::OtherOption);
 
     let model_panel = column![
         text("模型选择").size(16),
@@ -1161,30 +1385,46 @@ fn view_normal_mode(app: &CannotMaxApp) -> Element<'_, Message> {
     // 手动阵容面板
     let roster_panel = view_roster_panel(app);
 
-    // 自动获取面板
-    let auto_fetch_panel = view_auto_fetch_panel(app);
+    // 自动获取面板（仅在游戏模式下显示）
+    let auto_fetch_panel = if app.config.game_mode != GameMode::WindowOnly {
+        view_auto_fetch_panel(app)
+    } else {
+        column![].into()
+    };
+
+    // 识别结果可视化开关
+    let visualization_toggle = view_visualization_toggle(app);
 
     // 预览与结果
     let preview_panel = view_preview(app);
     let result_panel = view_result_panel(app);
     let special_panel = view_special_panel(app);
 
+    // 怪物选择弹窗覆盖层
+    let monster_picker_overlay = if app.roster_manager.panel.monster_picker_open {
+        view_monster_picker_overlay(app)
+    } else {
+        column![].into()
+    };
+
     row![
-        container(column![
+        container(scrollable(column![
             controls,
             model_panel,
             roster_panel,
             auto_fetch_panel,
-        ].spacing(16))
+            visualization_toggle,
+        ].spacing(16)).width(Length::Fill).height(Length::Fill))
             .width(Length::FillPortion(1)),
-        container(column![
+        container(scrollable(column![
             preview_panel,
             result_panel,
             special_panel,
-        ].spacing(16))
+        ].spacing(16)).width(Length::Fill).height(Length::Fill))
             .width(Length::FillPortion(2)),
     ]
     .spacing(20)
+    .push(monster_picker_overlay)
     .into()
 }
 
@@ -1248,8 +1488,15 @@ fn view_developer_mode(app: &CannotMaxApp) -> Element<'_, Message> {
     let result_panel = view_result_panel(app);
     let special_panel = view_special_panel(app);
 
+    // 怪物选择弹窗覆盖层
+    let monster_picker_overlay = if app.roster_manager.panel.monster_picker_open {
+        view_monster_picker_overlay(app)
+    } else {
+        column![].into()
+    };
+
     row![
-        container(column![
+        container(scrollable(column![
             controls,
             model_panel,
             roster_panel,
@@ -1260,16 +1507,17 @@ fn view_developer_mode(app: &CannotMaxApp) -> Element<'_, Message> {
             training_panel,
             visualization_toggle,
             history_panel,
-        ].spacing(16))
+        ].spacing(16)).width(Length::Fill).height(Length::Fill))
             .width(Length::FillPortion(1)),
-        container(column![
+        container(scrollable(column![
             preview_panel,
             result_panel,
             special_panel,
-        ].spacing(16))
+        ].spacing(16)).width(Length::Fill).height(Length::Fill))
             .width(Length::FillPortion(2)),
     ]
     .spacing(20)
+    .push(monster_picker_overlay)
     .into()
 }
 
@@ -1406,17 +1654,38 @@ fn view_path_panel(app: &CannotMaxApp) -> Element<'_, Message> {
         row![
             text_input("资源根目录", &app.resource_root_text)
                 .on_input(Message::ResourceRootChanged)
-                .width(Length::FillPortion(3)),
+                .width(Length::Fill),
             button("浏览…").on_press(Message::OpenResourceDirDialog),
         ]
         .spacing(8),
-        text_input("模型路径", &app.model_path_text).on_input(Message::ModelPathChanged),
-        text_input("MAA 动态库路径", &app.maa_library_path_text)
-            .on_input(Message::MaaLibraryPathChanged),
-        text_input("OCR 模型目录", &app.ocr_model_path_text)
-            .on_input(Message::OcrModelPathChanged),
-        text_input("deepseek-ocr-cli 路径", &app.deepseek_cli_path_text)
-            .on_input(Message::DeepseekCliPathChanged),
+        row![
+            text_input("模型路径", &app.model_path_text)
+                .on_input(Message::ModelPathChanged)
+                .width(Length::Fill),
+            button("浏览…").on_press(Message::OpenModelPathDialog),
+        ]
+        .spacing(8),
+        row![
+            text_input("MAA 动态库路径", &app.maa_library_path_text)
+                .on_input(Message::MaaLibraryPathChanged)
+                .width(Length::Fill),
+            button("浏览…").on_press(Message::OpenMaaLibraryDialog),
+        ]
+        .spacing(8),
+        row![
+            text_input("OCR 模型目录", &app.ocr_model_path_text)
+                .on_input(Message::OcrModelPathChanged)
+                .width(Length::Fill),
+            button("浏览…").on_press(Message::OpenOcrModelDialog),
+        ]
+        .spacing(8),
+        row![
+            text_input("deepseek-ocr-cli 路径", &app.deepseek_cli_path_text)
+                .on_input(Message::DeepseekCliPathChanged)
+                .width(Length::Fill),
+            button("浏览…").on_press(Message::OpenDeepseekCliDialog),
+        ]
+        .spacing(8),
         pick_list(
             DeepseekCliModel::ALL.to_vec(),
             Some(app.config.deepseek_model),
@@ -1431,6 +1700,27 @@ fn view_path_panel(app: &CannotMaxApp) -> Element<'_, Message> {
             Message::OcrBackendSelected
         )
         .placeholder("选择 OCR 后端"),
+        row![
+            text_input("场地识别模型路径", &app.field_model_path_text)
+                .on_input(Message::FieldModelPathChanged)
+                .width(Length::Fill),
+            button("浏览…").on_press(Message::OpenFieldModelDialog),
+        ]
+        .spacing(8),
+        row![
+            text_input("历史数据路径", &app.history_data_path_text)
+                .on_input(Message::HistoryDataPathChanged)
+                .width(Length::Fill),
+            button("浏览…").on_press(Message::OpenHistoryDataDialog),
+        ]
+        .spacing(8),
+        row![
+            text_input("截图保存目录", &app.screenshots_dir_text)
+                .on_input(Message::ScreenshotsDirChanged)
+                .width(Length::Fill),
+            button("浏览…").on_press(Message::OpenScreenshotsDirDialog),
+        ]
+        .spacing(8),
         text(&app.resources_summary).size(14),
     ]
     .spacing(8)
@@ -1521,6 +1811,12 @@ fn view_training_panel(app: &CannotMaxApp) -> Element<'_, Message> {
         "暂无训练进度".to_string()
     };
 
+    // 学习率调度器选项
+    let lr_scheduler_options = vec![
+        LrScheduler::Fixed,
+        LrScheduler::CosineAnnealing { t_max: 200, eta_min: 1e-5 },
+    ];
+
     column![
         text("模型训练（UnitAwareTransformer）").size(20),
         text_input("数据文件", &app.train_data_file_text).on_input(Message::TrainDataFileChanged),
@@ -1538,6 +1834,27 @@ fn view_training_panel(app: &CannotMaxApp) -> Element<'_, Message> {
             text_input("seed", &app.train_seed_text).on_input(Message::TrainSeedChanged).width(Length::FillPortion(1)),
             text_input("max_feature_value", &app.train_max_feature_value_text).on_input(Message::TrainMaxFeatureValueChanged).width(Length::FillPortion(1)),
         ].spacing(8),
+        text("高级配置").size(14),
+        row![
+            text("Dropout:").size(13),
+            text_input("0.2", &app.train_dropout_text).on_input(Message::TrainDropoutChanged).width(80),
+            Space::new().width(Length::Fill),
+            text("梯度裁剪:").size(13),
+            text_input("1.0", &app.train_gradient_clip_norm_text).on_input(Message::TrainGradientClipNormChanged).width(80),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        row![
+            text("学习率调度器:").size(13),
+            pick_list(
+                lr_scheduler_options,
+                Some(app.config.train_config.lr_scheduler.clone()),
+                Message::TrainLrSchedulerSelected
+            )
+            .placeholder("选择调度器"),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
         button(if app.training_busy { "训练中…" } else { "开始训练" })
             .on_press_maybe((!app.training_busy).then_some(Message::StartTraining)),
         text(train_progress_text).size(13),
@@ -1604,14 +1921,30 @@ fn view_preview(app: &CannotMaxApp) -> Element<'_, Message> {
                 })
                 .collect::<Vec<Element<'_, Message>>>();
 
-            row(items).spacing(8).into()
+            scrollable(row(items).spacing(8)).height(120).into()
+        };
+
+        // 普通窗口模式下显示ROI框提示
+        let roi_hint: Element<_> = if app.config.game_mode == GameMode::WindowOnly {
+            text("提示：可在预览画面上拖拽框选ROI").size(13).into()
+        } else {
+            column![].into()
+        };
+
+        // ROI拖拽中的视觉反馈
+        let roi_drag_hint: Element<_> = if app.roi_dragging.is_some() {
+            text("正在框选ROI区域…").size(13).into()
+        } else {
+            column![].into()
         };
 
         column![
             text("当前预览").size(20),
             image(handle.clone()).width(Length::Fill).height(Length::FillPortion(2)),
+            roi_hint,
+            roi_drag_hint,
             text("槽位截图").size(16),
-            scrollable(container(slot_gallery).width(Length::Fill)).height(120),
+            slot_gallery,
         ]
         .spacing(8)
         .into()
@@ -1669,4 +2002,85 @@ fn view_special_panel(app: &CannotMaxApp) -> Element<'_, Message> {
         .spacing(4)
         .into()
     }
+}
+
+/// 怪物选择弹窗覆盖层
+fn view_monster_picker_overlay(app: &CannotMaxApp) -> Element<'_, Message> {
+    // 搜索过滤
+    let filter = app.roster_manager.panel.monster_filter.to_lowercase();
+    let filtered_monsters: Vec<_> = app
+        .roster_manager
+        .available_monsters
+        .iter()
+        .filter(|m| filter.is_empty() || m.name.to_lowercase().contains(&filter))
+        .collect();
+
+    // 怪物网格：每行4个，使用弹性布局
+    let monsters_per_row = 4;
+    let mut grid_column = column![].spacing(8);
+
+    let mut row_content = row![].spacing(8).width(Length::Fill);
+    let mut count_in_row = 0;
+
+    for monster in &filtered_monsters {
+        let monster_id = monster.id;
+        let monster_name = monster.name.clone();
+        let card = button(
+            column![
+                image(monster.thumbnail.clone()).width(48).height(48),
+                text(monster_name.clone()).size(12),
+            ]
+            .spacing(4)
+            .align_x(Alignment::Center)
+        )
+        .on_press(Message::MonsterSelected(monster_id, monster_name))
+        .width(Length::FillPortion(1));
+
+        row_content = row_content.push(card);
+        count_in_row += 1;
+
+        if count_in_row >= monsters_per_row {
+            grid_column = grid_column.push(row_content);
+            row_content = row![].spacing(8).width(Length::Fill);
+            count_in_row = 0;
+        }
+    }
+    if count_in_row > 0 {
+        grid_column = grid_column.push(row_content);
+    }
+
+    let grid_element: Element<_> = if filtered_monsters.is_empty() {
+        text("无匹配怪物").size(14).into()
+    } else {
+        grid_column.into()
+    };
+
+    let overlay = container(
+        column![
+            row![
+                text("选择怪物").size(20),
+                Space::new().width(Length::Fill),
+                button("关闭").on_press(Message::MonsterPickerClosed),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            text_input("搜索怪物名称…", &app.roster_manager.panel.monster_filter)
+                .on_input(Message::MonsterFilterChanged)
+                .width(Length::Fill),
+            scrollable(column![grid_element].spacing(8)).height(400).width(Length::Fill),
+        ]
+        .spacing(12)
+    )
+    .width(500)
+    .height(Length::Shrink)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill);
+
+    // 覆盖层背景
+    container(overlay)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
 }
