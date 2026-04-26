@@ -1,6 +1,6 @@
 use crate::core::{BattleSnapshot, Roi, Side, UnitAnnotation, VisualizationOverlay};
 use image::{Rgba, RgbaImage};
-use crate::recognition::AVATAR_REGIONS_REL;
+use crate::recognition::{AVATAR_REGIONS_REL, COUNT_REGIONS_REL};
 
 /// 可视化渲染器
 pub struct VisualizationRenderer;
@@ -21,6 +21,7 @@ impl VisualizationRenderer {
                     slot_index: unit.slot,
                     side: unit.side,
                     unit_id: unit.unit_id.clone(),
+                    unit_name: unit.unit_name.clone(),
                     count: unit.count,
                     confidence: unit.confidence,
                     bbox,
@@ -75,21 +76,31 @@ impl VisualizationRenderer {
 
     /// 从 ROI 图中裁剪 6 个槽位图（按 AVATAR_REGIONS_REL 顺序）
     pub fn extract_slot_images(roi_image: &RgbaImage) -> Vec<RgbaImage> {
-        AVATAR_REGIONS_REL
-            .iter()
-            .map(|region| {
-                let x = ((roi_image.width() as f32) * region.0) as u32;
-                let y = ((roi_image.height() as f32) * region.1) as u32;
-                let right = ((roi_image.width() as f32) * region.2) as u32;
-                let bottom = ((roi_image.height() as f32) * region.3) as u32;
-
-                let width = right.saturating_sub(x).max(1);
-                let height = bottom.saturating_sub(y).max(1);
-
-                image::imageops::crop_imm(roi_image, x, y, width, height).to_image()
-            })
-            .collect()
+        extract_regions(roi_image, &AVATAR_REGIONS_REL)
     }
+
+    /// 从 ROI 图中裁剪 6 个数字区域图（按 COUNT_REGIONS_REL 顺序）
+    pub fn extract_count_images(roi_image: &RgbaImage) -> Vec<RgbaImage> {
+        extract_regions(roi_image, &COUNT_REGIONS_REL)
+    }
+}
+
+/// 从 ROI 图中按相对区域列表裁剪子图
+fn extract_regions(roi_image: &RgbaImage, regions: &[(f32, f32, f32, f32)]) -> Vec<RgbaImage> {
+    regions
+        .iter()
+        .map(|region| {
+            let x = ((roi_image.width() as f32) * region.0) as u32;
+            let y = ((roi_image.height() as f32) * region.1) as u32;
+            let right = ((roi_image.width() as f32) * region.2) as u32;
+            let bottom = ((roi_image.height() as f32) * region.3) as u32;
+
+            let width = right.saturating_sub(x).max(1);
+            let height = bottom.saturating_sub(y).max(1);
+
+            image::imageops::crop_imm(roi_image, x, y, width, height).to_image()
+        })
+        .collect()
 }
 
 /// 计算单个单位在ROI图中的边界框
@@ -177,6 +188,7 @@ mod tests {
                     side: Side::Left,
                     slot: 0,
                     unit_id: "1".to_string(),
+                    unit_name: "测试怪物1".to_string(),
                     count: 3,
                     confidence: 0.95,
                     count_source: "OCR".to_string(),
@@ -186,6 +198,7 @@ mod tests {
                     side: Side::Right,
                     slot: 1,
                     unit_id: "5".to_string(),
+                    unit_name: "测试怪物5".to_string(),
                     count: 2,
                     confidence: 0.88,
                     count_source: "OCR".to_string(),

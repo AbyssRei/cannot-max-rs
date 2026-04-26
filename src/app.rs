@@ -4,7 +4,7 @@ use crate::capture::{capture_frame, capture_window_native, discover_sources, is_
 use crate::config::{AppConfig, Win32InputMethodConfig};
 use crate::core::{
     AnalysisOutput, CaptureCatalog, CaptureSource, GameMode, LrScheduler, ModelSelection, PredictionResult,
-    RosterPanelState, RosterSource, Side, SourceChoice, TrainConfig, TrainProgress, TrainResult,
+    RecognizedUnit, RosterPanelState, RosterSource, Side, SourceChoice, TrainConfig, TrainProgress, TrainResult,
     UiMode,
 };
 use crate::model_scanner::ModelScanner;
@@ -149,6 +149,8 @@ pub struct CannotMaxApp {
     selected_source: Option<SourceChoice>,
     preview: Option<image::Handle>,
     slot_previews: Vec<image::Handle>,
+    count_previews: Vec<image::Handle>,
+    last_units: Vec<RecognizedUnit>,
     recognized_rows: Vec<String>,
     prediction: Option<PredictionResult>,
     status: String,
@@ -279,6 +281,8 @@ impl CannotMaxApp {
             selected_source: None,
             preview: None,
             slot_previews: Vec::new(),
+            count_previews: Vec::new(),
+            last_units: Vec::new(),
             recognized_rows: Vec::new(),
             prediction: None,
             status: "正在加载输入源…".to_string(),
@@ -634,6 +638,14 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                         })
                         .collect();
 
+                    let count_images = VisualizationRenderer::extract_count_images(&roi_image);
+                    app.count_previews = count_images
+                        .into_iter()
+                        .map(|img| {
+                            image::Handle::from_rgba(img.width(), img.height(), img.into_raw())
+                        })
+                        .collect();
+
                     // 可视化渲染
                     if app.visualization_enabled {
                         let overlay = VisualizationRenderer::build_overlay(
@@ -656,6 +668,7 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                         ));
                     }
 
+                    app.last_units = output.snapshot.units.clone();
                     app.recognized_rows = if output.snapshot.units.is_empty() {
                         vec!["未识别到有效单位，当前为一期模板匹配基线。".to_string()]
                     } else {
@@ -664,11 +677,16 @@ pub fn update(app: &mut CannotMaxApp, message: Message) -> Task<Message> {
                             .units
                             .iter()
                             .map(|unit| {
+                                let name_display = if unit.unit_name.is_empty() {
+                                    unit.unit_id.clone()
+                                } else {
+                                    format!("{}({})", unit.unit_name, unit.unit_id)
+                                };
                                 format!(
-                                    "{} 槽位{} | ID {} | 数量 {} | 置信度 {:.2} | 数量来源 {}{}",
+                                    "{} 槽位{} | {} | 数量 {} | 置信度 {:.2} | 数量来源 {}{}",
                                     unit.side,
                                     unit.slot,
-                                    unit.unit_id,
+                                    name_display,
                                     unit.count,
                                     unit.confidence,
                                     unit.count_source,
@@ -2070,6 +2088,7 @@ fn view_history_panel(app: &CannotMaxApp) -> Element<'_, Message> {
 
 fn view_preview(app: &CannotMaxApp) -> Element<'_, Message> {
     if let Some(handle) = &app.preview {
+        // 构建槽位信息：每个槽位显示头像截图 + 数字区域截图 + 识别结果
         let slot_gallery: Element<'_, Message> = if app.slot_previews.is_empty() {
             text("暂无槽位截图").size(13).into()
         } else {
@@ -2078,16 +2097,31 @@ fn view_preview(app: &CannotMaxApp) -> Element<'_, Message> {
                 .iter()
                 .enumerate()
                 .map(|(idx, slot)| {
-                    column![
-                        text(format!("槽位 {}", idx + 1)).size(12),
-                        image(slot.clone()).width(120).height(80),
-                    ]
-                    .spacing(4)
-                    .into()
+                    // 查找该槽位的识别结果
+                    let unit_info = app.last_units.iter().find(|u| u.slot == idx);
+                    let count_img = app.count_previews.get(idx);
+
+                    let side_label = if idx < 3 { "左" } else { "右" };
+                    let header = if let Some(unit) = unit_info {
+                        let name = if unit.unit_name.is_empty() {
+                            unit.unit_id.clone()
+                        } else {
+                            unit.unit_name.clone()
+                        };
+                        text(format!("{}槽位{}: {} x{}", side_label, idx + 1, name, unit.count)).size(11)
+                    } else {
+                        text(format!("{}槽位{}: (空)", side_label, idx + 1)).size(11)
+                    };
+
+                    let mut col = column![header, image(slot.clone()).width(120).height(80)].spacing(2);
+                    if let Some(cimg) = count_img {
+                        col = col.push(image(cimg.clone()).width(120).height(30));
+                    }
+                    col.spacing(2).into()
                 })
                 .collect::<Vec<Element<'_, Message>>>();
 
-            scrollable(row(items).spacing(8)).height(120).into()
+            scrollable(row(items).spacing(8)).height(140).into()
         };
 
         // 普通窗口模式下显示ROI设置提示和当前ROI信息

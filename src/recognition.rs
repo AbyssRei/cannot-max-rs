@@ -27,10 +27,10 @@ pub const COUNT_REGIONS_REL: [(f32, f32, f32, f32); 6] = [
 
 /// 战斗区域 ROI（相对比例，基于全屏坐标）
 const BATTLE_ROI_REL: RelativeRoi = RelativeRoi {
-    x: 0.2470,
-    y: 0.8425,
-    width: 0.5075,
-    height: 0.1112,
+    x: 0.2479,
+    y: 0.8410,
+    width: 0.5047,
+    height: 0.1100,
 };
 
 pub fn analyze_frame(
@@ -87,7 +87,7 @@ fn recognize_units(
         let avatar = image::imageops::crop_imm(frame, ax, ay, aw, ah).to_image();
         let avatar = image::imageops::resize(&avatar, 48, 48, FilterType::Triangle);
 
-        let (unit_id, confidence) = best_template_match(&avatar, resources);
+        let (unit_id, unit_name, confidence) = best_template_match(&avatar, resources);
         if unit_id == "empty" || confidence < 0.45 {
             continue;
         }
@@ -124,6 +124,7 @@ fn recognize_units(
             side: if index < 3 { Side::Left } else { Side::Right },
             slot: index,
             unit_id,
+            unit_name,
             count,
             confidence,
             count_source,
@@ -134,11 +135,12 @@ fn recognize_units(
     units
 }
 
-fn best_template_match(slot: &GrayImage, resources: &ResourceStore) -> (String, f32) {
+fn best_template_match(slot: &GrayImage, resources: &ResourceStore) -> (String, String, f32) {
     // 将灰度槽位转为 RGBA 用于 NCC 匹配
     let slot_rgba = image::DynamicImage::ImageLuma8(slot.clone()).to_rgba8();
 
     let mut best_id = "empty".to_string();
+    let mut best_name = String::new();
     let mut best_score = resources
         .empty_thumbnail
         .as_ref()
@@ -154,10 +156,11 @@ fn best_template_match(slot: &GrayImage, resources: &ResourceStore) -> (String, 
         if score > best_score {
             best_score = score;
             best_id = template.id.to_string();
+            best_name = template.name.clone();
         }
     }
 
-    (best_id, best_score)
+    (best_id, best_name, best_score)
 }
 
 fn compare_ncc(left: &RgbaImage, right: &RgbaImage) -> f32 {
