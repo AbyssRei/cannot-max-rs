@@ -1,0 +1,213 @@
+import {
+    Button,
+    VerticalBox,
+    HorizontalBox,
+    GridBox,
+    GroupBox, CheckBox, ComboBox, LineEdit,
+} from "std-widgets.slint";
+
+export enum DataSource {
+    none,
+    adb,
+    pc,
+    window_capture,
+}
+
+
+export component ControlPanel inherits Rectangle {
+    height: 150px;
+    background: transparent;
+    in property <bool> input-panel-visible: false;
+    in property <bool> history-panel-visible: false;
+    in property <bool> window-topmost: false;
+    in property <DataSource> data-source: DataSource.none;
+    callback request-recognize();
+    callback request-reset();
+    callback request-predict();
+    callback request-recognize-and-predict();
+    callback request-toggle-input-panel();
+    callback request-toggle-history-panel();
+    callback request-toggle-window-topmost();
+    callback request-change-data-source(DataSource);
+    VerticalLayout {
+        HorizontalLayout {
+            alignment: center;
+            spacing: 12px;
+
+            Button {
+                text: "识别并预测";
+                clicked => {
+                    root.request-recognize-and-predict();
+                }
+            }
+
+            Button {
+                text: "识别";
+                clicked => {
+                    root.request-recognize();
+                }
+            }
+
+            Button {
+                text: "预测";
+                clicked => {
+                    root.request-predict();
+                }
+            }
+
+            Button {
+                text: "重置";
+                clicked => {
+                    root.request-reset();
+                }
+            }
+        }
+
+        HorizontalLayout {
+            VerticalLayout { 
+                VerticalLayout {
+                    HorizontalLayout {
+                        Text {
+                            text: "训练时长(小时)";
+                        }
+                        LineEdit {
+                            text: 325;
+                            input-type: number;
+                        }
+                        ComboBox {
+                            // current-value: "first";
+                            model: ["单人", "30人"];
+
+                        }
+                        CheckBox {
+                            text: "预测";
+                        }
+                        CheckBox {
+                            text: "投资";
+                        }
+                    }
+                    HorizontalLayout {
+                        Button {
+                            text: "自动获取数据";
+                            clicked => {}
+                        }
+                        Button {
+                            text: "数据打包";
+                            clicked => {}
+                        }
+                    }
+                    Text {
+                        text: "https://github.com/AbyssRei/cannot-max-rs";
+                    }
+                }
+                VerticalLayout {
+                    HorizontalLayout {
+                        Button {
+                            text: "安卓端 - ADB";
+                            primary: true ? root.data-source == DataSource.adb : false;
+                            clicked => {request-change-data-source(DataSource.adb);}
+                        }
+                        Button {
+                            text: "PC端";
+                            primary: true ? root.data-source == DataSource.pc : false;
+                            clicked => {request-change-data-source(DataSource.pc);}
+                        }
+                        Button {
+                            text: "窗口捕获";
+                            primary: true ? root.data-source == DataSource.window_capture : false;  
+                            clicked => {request-change-data-source(DataSource.window_capture);}
+                        }
+                    }
+                    if root.data-source == DataSource.adb : VerticalLayout{
+                        HorizontalLayout {
+                            Text {
+                                text: "ADB设备: ";
+                            }
+                            ComboBox {
+                                model: ["未发现设备"];
+                            }
+                            Button {
+                                text: "刷新设备列表";
+                                clicked => {}
+                            }
+                            Button {
+                                text: "连接设备";
+                                clicked => {}
+                            }
+                        }
+                        Text {
+                            text: "请确保已连接安卓设备并开启USB调试";
+                        }
+                        
+                    }
+                    if root.data-source == DataSource.pc : VerticalLayout{
+                        HorizontalLayout {
+                            Text {
+                                text: "游戏窗口: ";
+                            }
+                            ComboBox {
+                                model: ["未发现设备"];
+                            }
+                            Button {
+                                text: "刷新设备列表";
+                                clicked => {}
+                            }
+                            Button {
+                                text: "连接设备";
+                                clicked => {}
+                            }
+                        }
+                        Text {
+                            text: "请确保已开启游戏并保持窗口打开";
+                        }
+                    }
+                    if root.data-source == DataSource.window-capture : VerticalLayout{
+                        HorizontalLayout {
+                            Text {
+                                text: "窗口: ";
+                            }
+                            ComboBox {
+                                model: ["未发现设备"];
+                            }
+                            Button {
+                                text: "刷新设备列表";
+                                clicked => {}
+                            }
+                            Button {
+                                text: "连接设备";
+                                clicked => {}
+                            }
+                        }
+                    }
+                    
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 12px;
+
+                Button {
+                    text: root.input-panel-visible ? "隐藏输入面板" : "显示输入面板";
+                    clicked => {
+                        root.request-toggle-input-panel();
+                    }
+                }
+
+                Button {
+                    text: root.history-panel-visible ? "隐藏历史面板" : "显示历史面板";
+                    clicked => {
+                        root.request-toggle-history-panel();
+                    }
+                }
+
+                Button {
+                    text: root.window-topmost ? "取消置顶" : "窗口置顶";
+                    clicked => {
+                        root.request-toggle-window-topmost();
+                    }
+                }
+            }
+        }
+    }
+}

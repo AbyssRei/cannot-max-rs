@@ -1,0 +1,112 @@
+import {
+    Button,
+    VerticalBox,
+    HorizontalBox,
+    GridBox,
+    GroupBox,
+} from "std-widgets.slint";
+
+import { AppState } from "common.slint";
+
+export struct RecognitionItem {
+    image: image,
+    count: int,
+    label: string,
+}
+
+export component ImageCard inherits Rectangle {
+    in property <image> img: @image-url("https://www.rust-lang.org/logos/rust-logo-512x512.png");
+    in property <int> count: 0;
+    in property <string> label: "";
+
+    width: 120px;
+    height: 150px;
+    border-radius: 8px;
+    background: #f0f0f0;
+    drop-shadow-blur: 4px;
+    drop-shadow-color: #aaa;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 4px;
+        alignment: center;
+
+        Image {
+            source: root.img;
+            width: 80px;
+            height: 80px;
+            image-fit: contain;
+        }
+
+        Text {
+            text: root.label;
+            horizontal-alignment: center;
+            font-size: 12px;
+            color: #333;
+        }
+
+        Text {
+            text: "数量: \{root.count}";
+            horizontal-alignment: center;
+            font-size: 14px;
+            font-weight: 700;
+            color: #1a73e8;
+        }
+    }
+}
+
+export component RecognitionPanel inherits Rectangle {
+    in property <[RecognitionItem]> left-items: [];
+    in property <[RecognitionItem]> right-items: [];
+    in property <AppState> state: AppState.idle;
+
+    height: 200px;
+    background: transparent;
+
+    if root.state == AppState.recognize-success || root.state == AppState.recognize-and-predict-success: HorizontalLayout {
+        height: root.height;
+        alignment: center;
+        spacing: 32px;
+
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: center;
+            for item in root.left-items: ImageCard {
+                img: item.image;
+                count: item.count;
+                label: item.label;
+            }
+        }
+
+        Text {
+            text: "VS";
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            font-size: 20px;
+            font-weight: 700;
+            color: #1a73e8;
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            alignment: center;
+            for item in root.right-items: ImageCard {
+                img: item.image;
+                count: item.count;
+                label: item.label;
+            }
+        }
+    }
+
+    if !(root.state == AppState.recognize-success || root.state == AppState.recognize-and-predict-success): VerticalLayout {
+        height: root.height;
+        alignment: center;
+
+        Text {
+            text: root.state == AppState.idle ? "等待识别..." : "识别中...";
+            horizontal-alignment: center;
+            font-size: 18px;
+            color: #888;
+        }
+    }
+}

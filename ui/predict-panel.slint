@@ -1,0 +1,93 @@
+import {
+    Button,
+    VerticalBox,
+    HorizontalBox,
+    GridBox,
+    GroupBox,
+} from "std-widgets.slint";
+
+import { AppState } from "common.slint";
+
+
+export struct PredictedItem {
+    model_serial: int,
+    confidence: float,
+}
+
+
+export component ModelPredictedResult inherits Rectangle {
+    in property <string> model_serial: "";
+    in property <float> confidence: 0.0;
+
+    HorizontalBox {
+        Text {
+            text: "Model" + model_serial;
+            width: 10%;
+            horizontal-alignment: left;
+            font-size: 16px;
+            color: #888;
+        }
+
+        Text {
+            text: "左" + confidence * 100 + "%";
+            width: 40%;
+            horizontal-alignment: right;
+            font-size: 16px;
+            color: confidence > 50 ? #1a73e8 : #888;
+        }
+
+        Text {
+            text: "|";
+            width: 10%;
+            horizontal-alignment: center;
+            font-size: 16px;
+            color: #888;
+        }
+
+        Text {
+            text: "右" + (100 - confidence * 100) + "%";
+            width: 40%;
+            horizontal-alignment: left;
+            font-size: 16px;
+            color: confidence < 50 ? #1a73e8 : #888;
+        }
+    }
+}
+
+
+export component PredictedResultPanel inherits Rectangle {
+    in property <[PredictedItem]> predicted-items: [];
+    in property <AppState> state: AppState.idle;
+    height: 200px;
+    background: transparent;
+
+    if root.state == AppState.predict-success || root.state == AppState.recognize-and-predict-success: VerticalLayout {
+        height: root.height;
+        spacing: 12px;
+        alignment: center;
+
+        Text {
+            text: "预测结果";
+            horizontal-alignment: center;
+            font-size: 18px;
+            color: #1a73e8;
+        }
+
+        for item in root.predicted-items: ModelPredictedResult {
+            model_serial: item.model_serial;
+            confidence: item.confidence;
+        }
+    }
+
+    if !(root.state == AppState.predict-success || root.state == AppState.recognize-and-predict-success): VerticalLayout {
+        height: root.height;
+        alignment: center;
+
+        Text {
+            text: root.state == AppState.predicting ? "预测中..." : "等待预测...";
+            horizontal-alignment: center;
+            font-size: 18px;
+            color: #888;
+        }
+    }
+}

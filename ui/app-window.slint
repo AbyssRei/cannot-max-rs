@@ -1,0 +1,95 @@
+import {
+    Button,
+    VerticalBox,
+    HorizontalBox,
+    GridBox,
+    GroupBox,
+} from "std-widgets.slint";
+
+import { AppState } from "common.slint";
+
+import { RecognitionItem, RecognitionPanel } from "recognition-panel.slint";
+import {
+    PredictedItem,
+    ModelPredictedResult,
+    PredictedResultPanel,
+} from "predict-panel.slint";
+
+import { ControlPanel } from "control-panel.slint";
+import { InputPanel } from "input-panel.slint";
+import { HistoryPanel } from "history-panel.slint";
+import { DataSource } from "control-panel.slint";
+
+export component AppWindow inherits Window {
+    in-out property <AppState> app-state: AppState.idle;
+    in-out property <[RecognitionItem]> left-items: [];
+    in-out property <[RecognitionItem]> right-items: [];
+    in-out property <[PredictedItem]> predicted-items: [];
+    in-out property <bool> input-panel-visible: false;
+    in-out property <bool> history-panel-visible: false;
+    in-out property <bool> window-topmost: false;
+    in-out property <DataSource> data-source: DataSource.none;
+    callback request-recognize();
+    callback request-predict();
+    callback request-recognize-and-predict();
+    callback request-reset();
+
+    title: "识别结果展示";
+    preferred-width: 800px;
+    preferred-height: 400px;
+    always-on-top: root.window-topmost;
+
+    HorizontalBox {
+        VerticalLayout {
+            padding: 24px;
+            spacing: 16px;
+
+            RecognitionPanel {
+                left-items: root.left-items;
+                right-items: root.right-items;
+                state: root.app-state;
+            }
+
+            PredictedResultPanel {
+                predicted-items: root.predicted-items;
+                state: root.app-state;
+            }
+
+            ControlPanel {
+                input-panel-visible: root.input-panel-visible;
+                history-panel-visible: root.history-panel-visible;
+                window-topmost: root.window-topmost;
+                data-source: root.data-source;
+                
+                request-recognize => {
+                    root.request-recognize();
+                }
+                request-predict => {
+                    root.request-predict();
+                }
+                request-recognize-and-predict => {
+                    root.request-recognize-and-predict();
+                }
+                request-reset => {
+                    root.request-reset();
+                }
+                request-toggle-input-panel => {
+                    root.input-panel-visible = !root.input-panel-visible;
+                }
+                request-toggle-history-panel => {
+                    root.history-panel-visible = !root.history-panel-visible;
+                }
+                request-toggle-window-topmost => {
+                    root.window-topmost = !root.window-topmost;
+                }
+                request-change-data-source(source) => {
+                    root.data-source = source;
+                }
+            }
+        }
+
+        if root.input-panel-visible: InputPanel { }
+
+        if root.history-panel-visible: HistoryPanel { }
+    }
+}
