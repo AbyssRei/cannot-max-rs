@@ -1,28 +1,27 @@
-import {
-    Button,
-    VerticalBox,
-    HorizontalBox,
-    GridBox,
-    GroupBox,
-} from "std-widgets.slint";
-
-import { AppState } from "common.slint";
+import { Button, VerticalBox, HorizontalBox, GridBox, GroupBox } from "std-widgets.slint";
+import { AppState, TerrainType } from "common.slint";
 
 export struct RecognitionItem {
     image: image,
     count: int,
     label: string,
+    low-confidence: bool,
+    count-uncertain: bool,
+    ocr-unavailable: bool,
 }
 
 export component ImageCard inherits Rectangle {
     in property <image> img: @image-url("https://www.rust-lang.org/logos/rust-logo-512x512.png");
     in property <int> count: 0;
     in property <string> label: "";
+    in property <bool> low-confidence: false;
+    in property <bool> count-uncertain: false;
+    in property <bool> ocr-unavailable: false;
 
     width: 120px;
     height: 150px;
     border-radius: 8px;
-    background: #f0f0f0;
+    background: self.low-confidence ? #fff3cd : #f0f0f0;
     drop-shadow-blur: 4px;
     drop-shadow-color: #aaa;
 
@@ -46,11 +45,11 @@ export component ImageCard inherits Rectangle {
         }
 
         Text {
-            text: "数量: \{root.count}";
+            text: root.ocr-unavailable ? "OCR不可用" : (root.count-uncertain ? "数量: \{root.count}?" : "数量: \{root.count}");
             horizontal-alignment: center;
             font-size: 14px;
             font-weight: 700;
-            color: #1a73e8;
+            color: root.ocr-unavailable ? #dc3545 : (root.count-uncertain ? #ffc107 : #1a73e8);
         }
     }
 }
@@ -58,6 +57,8 @@ export component ImageCard inherits Rectangle {
 export component RecognitionPanel inherits Rectangle {
     in property <[RecognitionItem]> left-items: [];
     in property <[RecognitionItem]> right-items: [];
+    in property <[TerrainType]> left-terrain: [];
+    in property <[TerrainType]> right-terrain: [];
     in property <AppState> state: AppState.idle;
 
     height: 200px;
@@ -75,6 +76,9 @@ export component RecognitionPanel inherits Rectangle {
                 img: item.image;
                 count: item.count;
                 label: item.label;
+                low-confidence: item.low-confidence;
+                count-uncertain: item.count-uncertain;
+                ocr-unavailable: item.ocr-unavailable;
             }
         }
 
@@ -94,6 +98,9 @@ export component RecognitionPanel inherits Rectangle {
                 img: item.image;
                 count: item.count;
                 label: item.label;
+                low-confidence: item.low-confidence;
+                count-uncertain: item.count-uncertain;
+                ocr-unavailable: item.ocr-unavailable;
             }
         }
     }
@@ -103,7 +110,7 @@ export component RecognitionPanel inherits Rectangle {
         alignment: center;
 
         Text {
-            text: root.state == AppState.idle ? "等待识别..." : "识别中...";
+            text: root.state == AppState.idle ? "等待识别..." : (root.state == AppState.recognizing ? "识别中..." : "等待识别...");
             horizontal-alignment: center;
             font-size: 18px;
             color: #888;

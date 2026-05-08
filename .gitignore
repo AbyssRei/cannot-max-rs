@@ -27,3 +27,6 @@ target
 .codex/
 .claude/
 .codeartsdoer/
+
+/MAA-*.zip
+/MAA-*/

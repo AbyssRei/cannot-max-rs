@@ -7,4 +7,31 @@ export enum AppState {
     predicting,
     predict-success,
     predict-failed,
+    fetching,
+    fetch-failed,
+}
+
+export enum TerrainType {
+    unknown,
+    altar,
+    block,
+    coil,
+    crossbow,
+    firearm,
+}
+
+export enum FetchPhase {
+    main-menu,
+    mode-select,
+    pre-battle,
+    in-battle,
+    settlement,
+    completed,
+}
+
+export enum DataSource {
+    none,
+    adb,
+    pc,
+    window-capture,
 }

@@ -1,59 +1,82 @@
-import {
-    Button,
-    VerticalBox,
-    HorizontalBox,
-    GridBox,
-    GroupBox,
-} from "std-widgets.slint";
-
+import { Button, VerticalBox, HorizontalBox, GridBox, GroupBox } from "std-widgets.slint";
 import { AppState } from "common.slint";
 
-
 export struct PredictedItem {
-    model_serial: int,
+    model-serial: int,
     confidence: float,
+    terrain-included: bool,
+    load-failed: bool,
+    inference-timeout: bool,
 }
 
-
 export component ModelPredictedResult inherits Rectangle {
-    in property <string> model_serial: "";
+    in property <int> model-serial: 0;
     in property <float> confidence: 0.0;
+    in property <bool> terrain-included: false;
+    in property <bool> load-failed: false;
+    in property <bool> inference-timeout: false;
 
     HorizontalBox {
         Text {
-            text: "Model" + model_serial;
+            text: "Model" + root.model-serial;
             width: 10%;
             horizontal-alignment: left;
             font-size: 16px;
             color: #888;
         }
 
-        Text {
-            text: "左" + confidence * 100 + "%";
-            width: 40%;
-            horizontal-alignment: right;
-            font-size: 16px;
-            color: confidence > 50 ? #1a73e8 : #888;
-        }
-
-        Text {
-            text: "|";
-            width: 10%;
-            horizontal-alignment: center;
-            font-size: 16px;
-            color: #888;
-        }
-
-        Text {
-            text: "右" + (100 - confidence * 100) + "%";
-            width: 40%;
+        if root.load-failed: Text {
+            text: "加载失败";
+            width: 90%;
             horizontal-alignment: left;
             font-size: 16px;
-            color: confidence < 50 ? #1a73e8 : #888;
+            color: #dc3545;
+        }
+
+        if root.inference-timeout: Text {
+            text: "推理超时";
+            width: 90%;
+            horizontal-alignment: left;
+            font-size: 16px;
+            color: #ffc107;
+        }
+
+        if !root.load-failed && !root.inference-timeout: HorizontalLayout {
+            width: 90%;
+            Text {
+                text: "左" + root.confidence * 100 + "%";
+                width: 40%;
+                horizontal-alignment: right;
+                font-size: 16px;
+                color: root.confidence > 0.5 ? #1a73e8 : #888;
+            }
+
+            Text {
+                text: "|";
+                width: 10%;
+                horizontal-alignment: center;
+                font-size: 16px;
+                color: #888;
+            }
+
+            Text {
+                text: "右" + (100 - root.confidence * 100) + "%";
+                width: 40%;
+                horizontal-alignment: left;
+                font-size: 16px;
+                color: root.confidence < 0.5 ? #1a73e8 : #888;
+            }
+
+            if root.terrain-included: Text {
+                text: "[地形]";
+                width: 10%;
+                horizontal-alignment: left;
+                font-size: 12px;
+                color: #28a745;
+            }
         }
     }
 }
-
 
 export component PredictedResultPanel inherits Rectangle {
     in property <[PredictedItem]> predicted-items: [];
@@ -74,8 +97,11 @@ export component PredictedResultPanel inherits Rectangle {
         }
 
         for item in root.predicted-items: ModelPredictedResult {
-            model_serial: item.model_serial;
+            model-serial: item.model-serial;
             confidence: item.confidence;
+            terrain-included: item.terrain-included;
+            load-failed: item.load-failed;
+            inference-timeout: item.inference-timeout;
         }
     }
 

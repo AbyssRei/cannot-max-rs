@@ -6,7 +6,7 @@ import {
     GroupBox,
 } from "std-widgets.slint";
 
-import { AppState } from "common.slint";
+import { AppState, TerrainType, FetchPhase, DataSource } from "common.slint";
 
 import { RecognitionItem, RecognitionPanel } from "recognition-panel.slint";
 import {
@@ -16,9 +16,9 @@ import {
 } from "predict-panel.slint";
 
 import { ControlPanel } from "control-panel.slint";
-import { InputPanel } from "input-panel.slint";
-import { HistoryPanel } from "history-panel.slint";
-import { DataSource } from "control-panel.slint";
+import { MonsterSelectItem, InputPanel } from "input-panel.slint";
+import { HistoryItem, HistoryPanel } from "history-panel.slint";
+import { RoiSelectionPopup, RoiSelectionState } from "roi-selection-window.slint";
 
 export component AppWindow inherits Window {
     in-out property <AppState> app-state: AppState.idle;
@@ -29,15 +29,72 @@ export component AppWindow inherits Window {
     in-out property <bool> history-panel-visible: false;
     in-out property <bool> window-topmost: false;
     in-out property <DataSource> data-source: DataSource.none;
+    in-out property <[TerrainType]> left-terrain: [];
+    in-out property <[TerrainType]> right-terrain: [];
+    in-out property <FetchPhase> fetch-phase: FetchPhase.main-menu;
+    in-out property <[HistoryItem]> history-items: [];
+    in-out property <[MonsterSelectItem]> monster-select-items: [];
+    in-out property <[string]> device-list: ["未发现设备"];
+    in-out property <int> selected-device-index: 0;
+    in-out property <int> screencap-method-index: 0;
+    in-out property <int> mouse-method-index: 1;
+    in-out property <int> keyboard-method-index: 2;
+    in-out property <string> connected-device-name: "";
+    in-out property <int> custom-roi-x: 0;
+    in-out property <int> custom-roi-y: 0;
+    in-out property <int> custom-roi-width: 0;
+    in-out property <int> custom-roi-height: 0;
     callback request-recognize();
     callback request-predict();
     callback request-recognize-and-predict();
     callback request-reset();
+    callback request-start-fetch();
+    callback request-stop-fetch();
+    callback request-data-package();
+    callback request-refresh-devices();
+    callback request-connect-device();
+    callback request-change-data-source(DataSource);
+    callback request-select-roi();
+    callback roi-confirmed(int, int, int, int);
 
     title: "识别结果展示";
     preferred-width: 800px;
     preferred-height: 400px;
     always-on-top: root.window-topmost;
+
+    private property <image> roi-example-image;
+    private property <image> roi-capture-image;
+    private property <string> roi-capture-error: "";
+    private property <int> roi-capture-width: 0;
+    private property <int> roi-capture-height: 0;
+
+    roi-popup := RoiSelectionPopup {
+        example-image: root.roi-example-image;
+        capture-image: root.roi-capture-image;
+        capture-error: root.roi-capture-error;
+        capture-width: root.roi-capture-width;
+        capture-height: root.roi-capture-height;
+        roi-confirmed(x, y, w, h) => {
+            root.custom-roi-x = x;
+            root.custom-roi-y = y;
+            root.custom-roi-width = w;
+            root.custom-roi-height = h;
+            roi-popup.close();
+            root.roi-confirmed(x, y, w, h);
+        }
+        roi-cancelled => {
+            roi-popup.close();
+        }
+    }
+
+    public function show-roi-selection-window(eg-img: image, capture-img: image, capture-err: string, capture-w: int, capture-h: int) {
+        root.roi-example-image = eg-img;
+        root.roi-capture-image = capture-img;
+        root.roi-capture-error = capture-err;
+        root.roi-capture-width = capture-w;
+        root.roi-capture-height = capture-h;
+        roi-popup.show();
+    }
 
     HorizontalBox {
         VerticalLayout {
@@ -47,6 +104,8 @@ export component AppWindow inherits Window {
             RecognitionPanel {
                 left-items: root.left-items;
                 right-items: root.right-items;
+                left-terrain: root.left-terrain;
+                right-terrain: root.right-terrain;
                 state: root.app-state;
             }
 
@@ -60,7 +119,17 @@ export component AppWindow inherits Window {
                 history-panel-visible: root.history-panel-visible;
                 window-topmost: root.window-topmost;
                 data-source: root.data-source;
-                
+                device-list: root.device-list;
+                selected-device-index <=> root.selected-device-index;
+                screencap-method-index <=> root.screencap-method-index;
+                mouse-method-index <=> root.mouse-method-index;
+                keyboard-method-index <=> root.keyboard-method-index;
+                connected-device-name <=> root.connected-device-name;
+                custom-roi-x: root.custom-roi-x;
+                custom-roi-y: root.custom-roi-y;
+                custom-roi-width: root.custom-roi-width;
+                custom-roi-height: root.custom-roi-height;
+
                 request-recognize => {
                     root.request-recognize();
                 }
@@ -83,13 +152,35 @@ export component AppWindow inherits Window {
                     root.window-topmost = !root.window-topmost;
                 }
                 request-change-data-source(source) => {
-                    root.data-source = source;
+                    root.request-change-data-source(source);
+                }
+                request-start-fetch => {
+                    root.request-start-fetch();
+                }
+                request-stop-fetch => {
+                    root.request-stop-fetch();
+                }
+                request-data-package => {
+                    root.request-data-package();
+                }
+                request-refresh-devices => {
+                    root.request-refresh-devices();
+                }
+                request-connect-device => {
+                    root.request-connect-device();
+                }
+                request-select-roi => {
+                    root.request-select-roi();
                 }
             }
         }
 
-        if root.input-panel-visible: InputPanel { }
+        if root.input-panel-visible: InputPanel {
+            monster-list: root.monster-select-items;
+        }
 
-        if root.history-panel-visible: HistoryPanel { }
+        if root.history-panel-visible: HistoryPanel {
+            history-items: root.history-items;
+        }
     }
 }

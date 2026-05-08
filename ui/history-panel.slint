@@ -1,7 +1,47 @@
-export component HistoryPanel inherits HorizontalLayout {
-    alignment: center;
-    spacing: 12px;
+import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export struct HistoryItem {
+    left-summary: string,
+    right-summary: string,
+    winner: string,
+    similarity: float,
+}
+
+export component HistoryPanel inherits VerticalLayout {
+    in property <[HistoryItem]> history-items: [];
+    padding: 12px;
+    spacing: 8px;
+
     Text {
-        text: "对局历史面板（待实现）";
+        text: "相似历史对局";
+        font-size: 16px;
+        font-weight: 700;
+    }
+
+    for item in root.history-items: HorizontalLayout {
+        spacing: 12px;
+        Text {
+            text: "左: " + item.left-summary;
+            font-size: 12px;
+            width: 30%;
+        }
+        Text {
+            text: "右: " + item.right-summary;
+            font-size: 12px;
+            width: 30%;
+        }
+        Text {
+            text: item.winner;
+            font-size: 12px;
+            font-weight: 700;
+            color: item.winner == "左胜" ? #1a73e8 : #dc3545;
+            width: 15%;
+        }
+        Text {
+            text: "相似度: " + round(item.similarity * 100) + "%";
+            font-size: 12px;
+            color: #888;
+            width: 25%;
+        }
     }
 }

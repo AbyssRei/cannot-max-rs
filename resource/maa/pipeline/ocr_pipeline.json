@@ -1,0 +1,9 @@
+{
+    "RecognizeMonsterCount": {
+        "recognition": "OCR",
+        "expected": "",
+        "threshold": 0.3,
+        "only_rec": true,
+        "roi": [0, 0, 0, 0]
+    }
+}

@@ -9,21 +9,25 @@ import {
     LineEdit,
 } from "std-widgets.slint";
 
-export enum DataSource {
-    none,
-    adb,
-    pc,
-    window_capture,
-}
-
+import { DataSource } from "common.slint";
 
 export component ControlPanel inherits Rectangle {
-    height: 250px;
+    // height: 300px;
     background: transparent;
     in property <bool> input-panel-visible: false;
     in property <bool> history-panel-visible: false;
     in property <bool> window-topmost: false;
     in property <DataSource> data-source: DataSource.none;
+    in property <[string]> device-list: ["未发现设备"];
+    in-out property <int> selected-device-index: 0;
+    in-out property <int> screencap-method-index: 0;
+    in-out property <int> mouse-method-index: 1;
+    in-out property <int> keyboard-method-index: 2;
+    in-out property <string> connected-device-name: "";
+    in property <int> custom-roi-x: 0;
+    in property <int> custom-roi-y: 0;
+    in property <int> custom-roi-width: 0;
+    in property <int> custom-roi-height: 0;
     callback request-recognize();
     callback request-reset();
     callback request-predict();
@@ -32,6 +36,12 @@ export component ControlPanel inherits Rectangle {
     callback request-toggle-history-panel();
     callback request-toggle-window-topmost();
     callback request-change-data-source(DataSource);
+    callback request-start-fetch();
+    callback request-stop-fetch();
+    callback request-data-package();
+    callback request-refresh-devices();
+    callback request-connect-device();
+    callback request-select-roi();
     VerticalLayout {
         spacing: 16px;
         HorizontalLayout {
@@ -84,7 +94,6 @@ export component ControlPanel inherits Rectangle {
                         }
 
                         ComboBox {
-                            // current-value: "first";
                             model: ["单人", "30人"];
                         }
 
@@ -102,12 +111,14 @@ export component ControlPanel inherits Rectangle {
                         Button {
                             text: "自动获取数据";
                             clicked => {
+                                root.request-start-fetch();
                             }
                         }
 
                         Button {
                             text: "数据打包";
                             clicked => {
+                                root.request-data-package();
                             }
                         }
                     }
@@ -139,9 +150,9 @@ export component ControlPanel inherits Rectangle {
 
                         Button {
                             text: "窗口捕获";
-                            primary: true ? root.data-source == DataSource.window_capture : false;
+                            primary: true ? root.data-source == DataSource.window-capture : false;
                             clicked => {
-                                request-change-data-source(DataSource.window_capture);
+                                request-change-data-source(DataSource.window-capture);
                             }
                         }
                     }
@@ -152,27 +163,37 @@ export component ControlPanel inherits Rectangle {
                             spacing: 8px;
                             Text {
                                 text: "ADB设备: ";
+                                vertical-alignment: center;
                             }
 
                             ComboBox {
-                                model: ["未发现设备"];
+                                model: root.device-list;
+                                current-index <=> root.selected-device-index;
                             }
 
                             Button {
                                 text: "刷新设备列表";
                                 clicked => {
+                                    root.request-refresh-devices();
                                 }
                             }
 
                             Button {
                                 text: "连接设备";
                                 clicked => {
+                                    root.request-connect-device();
                                 }
                             }
                         }
 
                         Text {
                             text: "请确保已连接安卓设备并开启USB调试";
+                        }
+
+                        if root.connected-device-name != "" && root.data-source == DataSource.adb: Text {
+                            text: "连接成功 " + root.connected-device-name;
+                            color: #4caf50;
+                            font-size: 13px;
                         }
                     }
                     if root.data-source == DataSource.pc: VerticalLayout {
@@ -181,27 +202,70 @@ export component ControlPanel inherits Rectangle {
                             spacing: 8px;
                             Text {
                                 text: "游戏窗口: ";
+                                vertical-alignment: center;
                             }
 
                             ComboBox {
-                                model: ["未发现设备"];
+                                model: root.device-list;
+                                current-index <=> root.selected-device-index;
                             }
 
                             Button {
                                 text: "刷新设备列表";
                                 clicked => {
+                                    root.request-refresh-devices();
                                 }
                             }
 
                             Button {
                                 text: "连接设备";
                                 clicked => {
+                                    root.request-connect-device();
                                 }
                             }
                         }
 
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: "截图: ";
+                                vertical-alignment: center;
+                            }
+
+                            ComboBox {
+                                model: ["WGC(后台)", "PrintWindow(后台)", "ScreenDC(前台)", "DesktopWindow(前台)"];
+                                current-index <=> root.screencap-method-index;
+                            }
+
+                            Text {
+                                text: "鼠标: ";
+                                vertical-alignment: center;
+                            }
+
+                            ComboBox {
+                                model: ["Seize(前台)", "SendMsg-CursorPos(半后台)", "SendMsg-WindowPos(全后台)"];
+                                current-index <=> root.mouse-method-index;
+                            }
+
+                            Text {
+                                text: "键盘: ";
+                                vertical-alignment: center;
+                            }
+
+                            ComboBox {
+                                model: ["Seize(前台)", "SendMsg(稳定)", "PostMsg(高效)"];
+                                current-index <=> root.keyboard-method-index;
+                            }
+                        }
+
                         Text {
-                            text: "请确保已开启游戏并保持窗口打开";
+                            text: "请确保已开启游戏并保持窗口打开，并将UI缩放设置修改为100%";
+                        }
+
+                        if root.connected-device-name != "" && root.data-source == DataSource.pc: Text {
+                            text: "连接成功 " + root.connected-device-name;
+                            color: #4caf50;
+                            font-size: 13px;
                         }
                     }
                     if root.data-source == DataSource.window-capture: VerticalLayout {
@@ -210,23 +274,40 @@ export component ControlPanel inherits Rectangle {
                             spacing: 8px;
                             Text {
                                 text: "窗口: ";
+                                vertical-alignment: center;
                             }
 
                             ComboBox {
-                                model: ["未发现设备"];
+                                model: root.device-list;
+                                current-index <=> root.selected-device-index;
                             }
 
                             Button {
                                 text: "刷新设备列表";
                                 clicked => {
+                                    root.request-refresh-devices();
                                 }
                             }
 
                             Button {
                                 text: "连接设备";
                                 clicked => {
+                                    root.request-connect-device();
                                 }
                             }
+                        }
+
+                        Button {
+                            text: "框选ROI区域";
+                            clicked => {
+                                root.request-select-roi();
+                            }
+                        }
+
+                        if root.connected-device-name != "": Text {
+                            text: "连接成功 " + root.connected-device-name + "(" + root.custom-roi-x + "," + root.custom-roi-y + " " + root.custom-roi-width + "x" + root.custom-roi-height + ")";
+                            color: #4caf50;
+                            font-size: 13px;
                         }
                     }
                 }

@@ -1,0 +1,32 @@
+(
+    capture_mode: Adb,
+    maa_option: (
+        draw_quality: 85,
+        logging: true,
+        save_draw: false,
+        save_on_error: true,
+        stdout_level: 2,
+    ),
+    model_paths: [
+        "resource/models/predict/model.safetensors",
+    ],
+    terrain_model_path: "resource/models/terrain/model.safetensors",
+    maa_ocr_resource_dir: "resource/maa",
+    history_data_path: "resource/data/arknights.csv",
+    monster_data_path: "resource/data/monster_greenvine.csv",
+    template_dir: "resource/templates",
+    simulator_config_path: "resource/simulator",
+    fetch_data_dir: "data",
+    preset_roi: (
+        x: 0,
+        y: 0,
+        width: 1280,
+        height: 720,
+    ),
+    custom_roi: Some((
+        x: 315,
+        y: 417,
+        width: 189,
+        height: 55,
+    )),
+)

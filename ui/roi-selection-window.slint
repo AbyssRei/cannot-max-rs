@@ -1,0 +1,233 @@
+import { Button } from "std-widgets.slint";
+
+export struct RoiSelectionState {
+    start-x: int,
+    start-y: int,
+    end-x: int,
+    end-y: int,
+    selecting: bool,
+}
+
+export component RoiSelectionPopup inherits PopupWindow {
+    close-policy: no-auto-close;
+    width: 640px;
+    height: 620px;
+
+    in-out property <image> example-image;
+    in-out property <image> capture-image;
+    in-out property <string> capture-error: "";
+    in-out property <int> capture-width: 0;
+    in-out property <int> capture-height: 0;
+    in-out property <int> roi-start-x: 0;
+    in-out property <int> roi-start-y: 0;
+    in-out property <int> roi-end-x: 0;
+    in-out property <int> roi-end-y: 0;
+    in-out property <bool> roi-selecting: false;
+    in-out property <int> area-width: 608;
+    in-out property <int> area-height: 300;
+    callback roi-confirmed(int, int, int, int);
+    callback roi-cancelled();
+
+    function computed-x() -> int {
+        return min(root.roi-start-x, root.roi-end-x);
+    }
+
+    function computed-y() -> int {
+        return min(root.roi-start-y, root.roi-end-y);
+    }
+
+    function computed-w() -> int {
+        return abs(root.roi-end-x - root.roi-start-x);
+    }
+
+    function computed-h() -> int {
+        return abs(root.roi-end-y - root.roi-start-y);
+    }
+
+    function clamp-x(x: int) -> int {
+        return max(0, min(x, root.area-width));
+    }
+
+    function clamp-y(y: int) -> int {
+        return max(0, min(y, root.area-height));
+    }
+
+    function relative-roi-x() -> int {
+        return root.capture-width > 0 && root.area-width > 0 ? root.computed-x() * root.capture-width / root.area-width : root.computed-x();
+    }
+
+    function relative-roi-y() -> int {
+        return root.capture-height > 0 && root.area-height > 0 ? root.computed-y() * root.capture-height / root.area-height : root.computed-y();
+    }
+
+    function relative-roi-w() -> int {
+        return root.capture-width > 0 && root.area-width > 0 ? root.computed-w() * root.capture-width / root.area-width : root.computed-w();
+    }
+
+    function relative-roi-h() -> int {
+        return root.capture-height > 0 && root.area-height > 0 ? root.computed-h() * root.capture-height / root.area-height : root.computed-h();
+    }
+
+    Rectangle {
+        background: #2d2d44;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+
+            Text {
+                text: "框选 ROI 区域";
+                font-size: 16px;
+                font-weight: 700;
+                color: #fff;
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+
+                Text {
+                    text: "示例图";
+                    font-size: 12px;
+                    color: #888;
+                }
+
+                Rectangle {
+                    preferred-height: 160px;
+                    background: #1a1a2e;
+                    border-radius: 4px;
+                    clip: true;
+
+                    Image {
+                        source: root.example-image;
+                        width: parent.width;
+                        height: parent.height;
+                        image-fit: fill;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+
+                Text {
+                    text: "窗口截图（在下方拖动框选）";
+                    font-size: 12px;
+                    color: #888;
+                }
+
+                selection-area := Rectangle {
+                    preferred-height: 300px;
+                    background: #1a1a2e;
+                    border-radius: 4px;
+                    clip: true;
+
+                    if root.capture-error == "": Image {
+                        source: root.capture-image;
+                        width: parent.width;
+                        height: parent.height;
+                        image-fit: fill;
+                    }
+
+                    if root.capture-error != "": VerticalLayout {
+                        alignment: center;
+                        padding: 20px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "截图失败";
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: #ff6b6b;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: root.capture-error;
+                            font-size: 13px;
+                            color: #aaa;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if root.capture-error == "": Rectangle {
+                        x: root.computed-x() * 1px;
+                        y: root.computed-y() * 1px;
+                        width: root.computed-w() * 1px;
+                        height: root.computed-h() * 1px;
+                        background: #ff6b6b44;
+                        border-width: 2px;
+                        border-color: #ff6b6b;
+                    }
+
+                    TouchArea {
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                                root.roi-start-x = root.clamp-x(self.mouse-x / 1px);
+                                root.roi-start-y = root.clamp-y(self.mouse-y / 1px);
+                                root.roi-end-x = root.roi-start-x;
+                                root.roi-end-y = root.roi-start-y;
+                                root.roi-selecting = true;
+                            } else if event.kind == PointerEventKind.move && root.roi-selecting {
+                                root.roi-end-x = root.clamp-x(self.mouse-x / 1px);
+                                root.roi-end-y = root.clamp-y(self.mouse-y / 1px);
+                            } else if event.kind == PointerEventKind.up && root.roi-selecting {
+                                root.roi-end-x = root.clamp-x(self.mouse-x / 1px);
+                                root.roi-end-y = root.clamp-y(self.mouse-y / 1px);
+                                root.roi-selecting = false;
+                            }
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: center;
+
+                Text {
+                    text: root.computed-w() > 0 && root.computed-h() > 0 ?
+                        "相对ROI: (" + root.relative-roi-x() + ", " + root.relative-roi-y() + ") " + root.relative-roi-w() + "x" + root.relative-roi-h() :
+                        "请在窗口截图上按住鼠标拖动框选";
+                    font-size: 13px;
+                    color: #aaa;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: center;
+
+                Button {
+                    text: "确认框选";
+                    clicked => {
+                        root.roi-confirmed(
+                            root.relative-roi-x(),
+                            root.relative-roi-y(),
+                            root.relative-roi-w(),
+                            root.relative-roi-h(),
+                        );
+                    }
+                }
+
+                Button {
+                    text: "重置";
+                    clicked => {
+                        root.roi-selecting = false;
+                        root.roi-start-x = 0;
+                        root.roi-start-y = 0;
+                        root.roi-end-x = 0;
+                        root.roi-end-y = 0;
+                    }
+                }
+
+                Button {
+                    text: "取消";
+                    clicked => {
+                        root.roi-cancelled();
+                    }
+                }
+            }
+        }
+    }
+}
